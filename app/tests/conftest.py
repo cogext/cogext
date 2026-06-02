@@ -1,11 +1,11 @@
 import os
 import uuid
 
-import asyncpg
 import pytest
 import pytest_asyncio
 from asgi_lifespan import LifespanManager
 from httpx import ASGITransport, AsyncClient
+from supabase import create_client
 
 from app.main import app
 from config import settings
@@ -38,39 +38,27 @@ async def test_client():
 
 @pytest_asyncio.fixture
 async def db_pool():
-    """Initialize the pool directly for tests that call backend functions without HTTP."""
-    from app.db.connection import close_pool, init_pool
-    await init_pool()
+    """Initialize the supabase client for tests that call backend functions without HTTP."""
+    from app.db.connection import close_supabase, init_supabase
+    await init_supabase()
     yield
-    await close_pool()
+    await close_supabase()
 
 
-@pytest_asyncio.fixture
-async def clean_db():
-    """Truncate test-owned rows before each DB test. Only active when RUN_DB_TESTS=true."""
+@pytest.fixture
+def clean_db():
+    """Truncate test-owned rows before (and after) each DB test."""
     if not _DB_TESTS:
         yield
         return
 
-    conn = await asyncpg.connect(settings.DATABASE_URL, statement_cache_size=0)
-    try:
-        await conn.execute(
-            "DELETE FROM commitments WHERE user_id = $1", TEST_USER_ID
-        )
-        await conn.execute(
-            "DELETE FROM episodic_log WHERE user_id = $1", TEST_USER_ID
-        )
-    finally:
-        await conn.close()
+    # Sync client so this fixture can run before the app lifespan starts
+    sb = create_client(settings.SUPABASE_URL, settings.SUPABASE_SERVICE_ROLE_KEY)
+
+    def _wipe():
+        sb.table("commitments").delete().eq("user_id", str(TEST_USER_ID)).execute()
+        sb.table("episodic_log").delete().eq("user_id", str(TEST_USER_ID)).execute()
+
+    _wipe()
     yield
-    # cleanup after too
-    conn = await asyncpg.connect(settings.DATABASE_URL, statement_cache_size=0)
-    try:
-        await conn.execute(
-            "DELETE FROM commitments WHERE user_id = $1", TEST_USER_ID
-        )
-        await conn.execute(
-            "DELETE FROM episodic_log WHERE user_id = $1", TEST_USER_ID
-        )
-    finally:
-        await conn.close()
+    _wipe()

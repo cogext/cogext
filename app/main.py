@@ -8,15 +8,15 @@ from app.api.recall import router as recall_router
 from app.api.status import router as status_router
 from app.core.extractor import extract_commitments
 from app.core.lifecycle import router as lifecycle_router
-from app.db.connection import close_pool, get_pool, init_pool
+from app.db.connection import close_supabase, get_supabase, init_supabase
 from app.llm.provider import extract_completion
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    await init_pool()
+    await init_supabase()
     yield
-    await close_pool()
+    await close_supabase()
 
 
 app = FastAPI(title="COGEXT", version="0.1.0", lifespan=lifespan)
@@ -33,9 +33,8 @@ async def health():
 
 @app.get("/db-check")
 async def db_check():
-    pool = get_pool()
-    async with pool.acquire() as conn:
-        await conn.fetchval("SELECT 1")
+    sb = get_supabase()
+    await sb.table("commitments").select("id").limit(1).execute()
     return {"db": "ok"}
 
 
