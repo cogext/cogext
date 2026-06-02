@@ -60,15 +60,9 @@ async def test_patch_sets_resolved_at(test_client, clean_db):
     )
     assert resp.status_code == 200
     # resolved_at not in our Commitment model response but we can verify via DB
-    import asyncpg
-    from config import settings
-    conn = await asyncpg.connect(settings.DATABASE_URL, statement_cache_size=0)
-    row = await conn.fetchrow(
-        "SELECT resolved_at FROM commitments WHERE id = $1",
-        uuid.UUID(c["id"])
-    )
-    await conn.close()
-    assert row["resolved_at"] is not None
+    from app.db.connection import get_supabase
+    row = await get_supabase().table("commitments").select("resolved_at").eq("id", c["id"]).execute()
+    assert row.data[0]["resolved_at"] is not None
 
 
 @skip_without_db
