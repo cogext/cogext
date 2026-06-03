@@ -83,7 +83,7 @@ cp .env.example .env
 uvicorn app.main:app --reload
 ```
 
-Health check: http://localhost:8000/health
+Health check: https://cogext.onrender.com/health
 
 ### Running Tests
 

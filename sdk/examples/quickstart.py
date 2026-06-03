@@ -1,3 +1,4 @@
+
 """
 COGEXT quickstart — no external agent framework required.
 
@@ -5,7 +6,7 @@ Run:
     python examples/quickstart.py
 
 Prerequisites:
-    - uvicorn app.main:app running on localhost:8000
+    - COGEXT_BASE_URL defaults to https://cogext.onrender.com/api/v1 (production)
     - pip install -e sdk/
 """
 
@@ -18,7 +19,7 @@ from cogext import CogextClient, track
 API_KEY = os.environ.get("COGEXT_API_KEY", "demo-key")
 USER_ID = os.environ.get("COGEXT_USER_ID", "11111111-1111-1111-1111-111111111111")
 AGENT_ID = os.environ.get("COGEXT_AGENT_ID", "22222222-2222-2222-2222-222222222222")
-BASE_URL = os.environ.get("COGEXT_BASE_URL", "http://localhost:8000/api/v1")
+BASE_URL = os.environ.get("COGEXT_BASE_URL", "https://cogext.onrender.com/api/v1")
 
 
 class SimpleAgent:
