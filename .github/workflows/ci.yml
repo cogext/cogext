@@ -1,0 +1,41 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    name: Unit tests (Python 3.12)
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt pytest pytest-asyncio respx asgi-lifespan
+
+      - name: Run unit tests
+        run: pytest app/tests/ -v --tb=short -q
+        env:
+          # DB integration tests are skipped unless RUN_DB_TESTS=true.
+          # Those require live Supabase credentials and run against production,
+          # so they are intentionally excluded from CI.
+          RUN_DB_TESTS: "false"
+          # Dummy credentials satisfy pydantic-settings required fields and
+          # allow the FastAPI lifespan to complete. supabase-py does not open
+          # a real connection until a query is executed, so no-DB tests pass
+          # cleanly while all DB tests remain skipped via @skip_without_db.
+          DATABASE_URL: "postgresql://ci:ci@localhost/ci"
+          SUPABASE_URL: "https://dummy.supabase.co"
+          SUPABASE_ANON_KEY: "dummy_anon_key_for_ci"
+          SUPABASE_SERVICE_ROLE_KEY: "dummy_service_role_key_for_ci"
+          GROQ_API_KEY: "dummy_groq_key_for_ci"
