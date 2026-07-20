@@ -17,7 +17,7 @@ COGEXT treats commitments as first-class objects. Each extracted commitment carr
 
 - **Trigger type** — `time`, `event_implicit`, `event_external`, or `state`
 - **Confidence score** — how certain the extractor is that a real commitment was made
-- **Lifecycle status** — `pending`, `kept`, `broken`, `pending_review`
+- **Lifecycle status** — `open`, `fulfilled`, `expired`, `contradicted`, `pending_review`
 - **Entity refs** — who made the promise, to whom, about what
 
 This is the data layer that lets you build trust dashboards, SLA monitors, or audit trails on top of agent conversations.
@@ -38,24 +38,20 @@ This is the data layer that lets you build trust dashboards, SLA monitors, or au
 ## SDK Quickstart
 
 ```python
-from cogext import CogextClient
+from cogext import track
 
-client = CogextClient(base_url="https://cogext.onrender.com")
+agent = YourExistingAgent()
 
-result = client.ingest(
-    agent_id="agent-123",
-    message="I'll send the contract once legal signs off, and follow up with Sarah by Friday."
+tracked = track(
+    agent,
+    api_key="your-api-key",
+    user_id="your-user-id",
+    agent_id="your-agent-id",
+    base_url="https://cogext.onrender.com/api/v1"
 )
 
-for commitment in result.commitments:
-    print(commitment.promise_text, commitment.trigger_type, commitment.confidence)
-```
-
-Or wrap an existing agent with one line:
-
-```python
-from cogext import track
-agent = track(your_agent)  # commitments extracted automatically on every response
+# runs exactly as before — commitments extracted automatically
+output = tracked.run("your prompt here")
 ```
 
 ---
@@ -73,7 +69,7 @@ The extractor uses structured LLM inference (Groq Llama 3.3 70B) with a retry-on
 ## For Contributors — Local Development
 
 ```bash
-git clone https://github.com/your-org/cogext-backend.git
+git clone https://github.com/cogext/cogext.git
 cd cogext-backend
 python -m venv venv
 source venv/bin/activate       # Windows: venv\Scripts\activate
