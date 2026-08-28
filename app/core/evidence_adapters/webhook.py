@@ -41,9 +41,11 @@ class GenericWebhookAdapter:
         actor = (
             raw_event.get("actor")
             or raw_event.get("user")
-            or raw_event.get("sender", {}).get("login")
-            if isinstance(raw_event.get("sender"), dict)
-            else raw_event.get("sender")
+            or (
+                raw_event.get("sender", {}).get("login")
+                if isinstance(raw_event.get("sender"), dict)
+                else raw_event.get("sender")
+            )
         )
 
         idem_key = hashlib.sha256(

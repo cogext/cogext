@@ -56,27 +56,7 @@ def resolve_deadline(
         d = anchor_timestamp + timedelta(days=1)
         resolved = d.replace(hour=23, minute=59, second=59, microsecond=0)
 
-    # --- "end of day" / "eod" ---
-    elif re.search(r'\bend of day\b|\beod\b', expr):
-        resolved = anchor_timestamp.replace(hour=23, minute=59, second=59, microsecond=0)
-
-    # --- "end of week" / "eow" ---
-    elif re.search(r'\bend of week\b|\beow\b', expr):
-        days_ahead = 4 - anchor_timestamp.weekday()   # Friday
-        if days_ahead < 0:
-            days_ahead += 7
-        d = anchor_timestamp + timedelta(days=days_ahead)
-        resolved = d.replace(hour=23, minute=59, second=59, microsecond=0)
-
-    # --- "end of month" / "eom" ---
-    elif re.search(r'\bend of month\b|\beom\b', expr):
-        import calendar
-        last_day = calendar.monthrange(anchor_timestamp.year, anchor_timestamp.month)[1]
-        resolved = anchor_timestamp.replace(
-            day=last_day, hour=23, minute=59, second=59, microsecond=0
-        )
-
-    # --- "by <weekday>" / "next <weekday>" ---
+    # --- "by <weekday>" / "next <weekday>" (checked BEFORE standalone EOD) ---
     else:
         wd_match = re.search(
             r'\b(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b', expr
@@ -96,6 +76,26 @@ def resolve_deadline(
                 resolved = d.replace(hour=17, minute=0, second=0, microsecond=0)
             else:
                 resolved = d.replace(hour=23, minute=59, second=59, microsecond=0)
+
+        # --- "end of day" / "eod" (no weekday present) ---
+        elif re.search(r'\bend of day\b|\beod\b', expr):
+            resolved = anchor_timestamp.replace(hour=23, minute=59, second=59, microsecond=0)
+
+        # --- "end of week" / "eow" ---
+        elif re.search(r'\bend of week\b|\beow\b', expr):
+            days_ahead = 4 - anchor_timestamp.weekday()   # Friday
+            if days_ahead < 0:
+                days_ahead += 7
+            d = anchor_timestamp + timedelta(days=days_ahead)
+            resolved = d.replace(hour=23, minute=59, second=59, microsecond=0)
+
+        # --- "end of month" / "eom" ---
+        elif re.search(r'\bend of month\b|\beom\b', expr):
+            import calendar
+            last_day = calendar.monthrange(anchor_timestamp.year, anchor_timestamp.month)[1]
+            resolved = anchor_timestamp.replace(
+                day=last_day, hour=23, minute=59, second=59, microsecond=0
+            )
 
     # --- "in N <unit>" ---
     if resolved is None:

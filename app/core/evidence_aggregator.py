@@ -57,11 +57,9 @@ def aggregate_evidence(
                 if detail.score_contribution > current_best:
                     field_coverage[field] = detail.score_contribution
 
-    # Aggregate score: weighted sum of best per-field scores
-    aggregate_score = sum(
-        field_coverage.get(field, 0.0) * weight
-        for field, weight in FIELD_WEIGHTS.items()
-    )
+    # Aggregate score: field_coverage values already carry the field weight
+    # (score_contribution = weight if matched else 0.0), so just sum them.
+    aggregate_score = sum(field_coverage.values())
 
     # Round to avoid float precision issues
     aggregate_score = round(aggregate_score, 4)
