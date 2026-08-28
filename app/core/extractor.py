@@ -1,3 +1,10 @@
+"""V1.5 – Commitment extractor with classification.
+
+Classification types:
+  genuine_commitment | intention | question | suggestion | hypothetical | quoted_statement
+
+Only genuine_commitment items are passed to the scorer for persistence.
+"""
 import hashlib
 import json
 import logging
@@ -11,50 +18,68 @@ logger = logging.getLogger(__name__)
 EXTRACTION_PROMPT = """
 You are a commitment extractor. Your job is to identify explicit promises or commitments in agent messages — statements where someone commits to doing something, with a deadline or trigger condition.
 
-A commitment has three required parts:
-1. An action the speaker promises to perform
-2. A timeframe or trigger that defines when it will be done
-3. Enough specificity to be verifiable
+## Classification
+First, classify each statement:
+- "genuine_commitment" — an explicit promise where someone commits to an action with a verifiable outcome
+- "intention" — expressed intent but lacks specificity or concrete deadline
+- "question" — a question rather than a commitment
+- "suggestion" — a recommendation, not a promise
+- "hypothetical" — "what if" or conditional speculation
+- "quoted_statement" — reporting what someone else said
+
+Only extract items with classification "genuine_commitment" AND confidence >= 0.5.
 
 ## Due condition types
 Classify each commitment's due_condition.type as exactly one of:
-- "time"           — has a specific deadline (e.g., "by Tuesday EOD", "end of month")
-- "event_implicit" — triggered by something the speaker controls (e.g., "after I finish X", "once I hear back")
-- "event_external" — triggered by an external event (e.g., "once legal signs off", "after the client approves")
-- "state"          — triggered when a condition becomes true (e.g., "when the build passes", "if sales drop")
+- "time"           — has a specific deadline (e.g., "by Tuesday EOD")
+- "event_implicit" — triggered by something the speaker controls (e.g., "after I finish X")
+- "event_external" — triggered by an external event (e.g., "once legal signs off")
+- "state"          — triggered when a condition becomes true (e.g., "when the build passes")
 
 ## Output schema
 Return a JSON array. Each element must match this schema exactly:
 {
   "promise_text": "<the commitment, stated clearly in first-person present tense>",
+  "classification": "<genuine_commitment|intention|question|suggestion|hypothetical|quoted_statement>",
+  "action": "<verb describing the action, or null>",
+  "object": "<what is being acted upon, or null>",
+  "recipient": "<who receives the action, or null>",
+  "deadline_expression": "<raw deadline text, or null>",
+  "conditions": ["<condition string>"],
   "due_condition": {
     "type": "<time|event_implicit|event_external|state>",
-    "deadline": "<ISO 8601 datetime string, or null if not a time-based deadline>",
-    "trigger_description": "<human-readable description of the trigger, or null>",
-    "entity_ref": "<name of person/system involved in trigger, or null>",
+    "deadline": "<ISO 8601 datetime string, or null>",
+    "trigger_description": "<human-readable description, or null>",
+    "entity_ref": "<name of person/system involved, or null>",
     "match_threshold": 0.88,
     "partial_match_threshold": 0.65
   },
-  "confidence": <float 0.0–1.0>
+  "confidence": <float 0.0-1.0>
 }
 
 ## Confidence guidelines
-- 0.9–1.0: explicit, unambiguous promise with clear deadline/trigger
-- 0.7–0.89: clear intent but slightly vague timing or trigger
-- 0.5–0.69: implied commitment, inferred from context
+- 0.9-1.0: explicit, unambiguous promise with clear deadline/trigger
+- 0.7-0.89: clear intent but slightly vague timing or trigger
+- 0.5-0.69: implied commitment, inferred from context
 - below 0.5: do not include
 
 ## Examples
 
-Input: "I'll send the quarterly report by Tuesday end of day."
+Input: "I'll send the deployment report to Sarah by Friday at 5pm."
 Output:
 [
   {
-    "promise_text": "I will send the quarterly report",
+    "promise_text": "I will send the deployment report to Sarah",
+    "classification": "genuine_commitment",
+    "action": "send",
+    "object": "deployment report",
+    "recipient": "Sarah",
+    "deadline_expression": "by Friday at 5pm",
+    "conditions": [],
     "due_condition": {
       "type": "time",
       "deadline": null,
-      "trigger_description": "by Tuesday end of day",
+      "trigger_description": "by Friday at 5pm",
       "entity_ref": null,
       "match_threshold": 0.88,
       "partial_match_threshold": 0.65
@@ -63,43 +88,14 @@ Output:
   }
 ]
 
-Input: "Once legal signs off I'll forward the contract, and I'll loop in Sarah after our sync."
-Output:
-[
-  {
-    "promise_text": "I will forward the contract",
-    "due_condition": {
-      "type": "event_external",
-      "deadline": null,
-      "trigger_description": "once legal signs off",
-      "entity_ref": "legal",
-      "match_threshold": 0.88,
-      "partial_match_threshold": 0.65
-    },
-    "confidence": 0.93
-  },
-  {
-    "promise_text": "I will loop in Sarah",
-    "due_condition": {
-      "type": "event_implicit",
-      "deadline": null,
-      "trigger_description": "after the sync",
-      "entity_ref": "Sarah",
-      "match_threshold": 0.88,
-      "partial_match_threshold": 0.65
-    },
-    "confidence": 0.88
-  }
-]
-
 Input: "Thanks for the update, sounds good."
 Output: []
 
 ## Rules
-- Return ONLY the JSON array. No markdown fences, no explanation, no extra text.
+- Return ONLY the JSON array. No markdown fences, no explanation.
 - If there are no commitments, return an empty array: []
-- Do not invent commitments. Only extract what is explicitly stated or strongly implied.
-- deadline must be a valid ISO 8601 string or null. Never guess a year; leave null if the year is ambiguous.
+- Do not invent commitments. Only extract what is explicitly stated.
+- deadline must be ISO 8601 or null.
 
 ## Message to extract from:
 """
@@ -153,7 +149,6 @@ def _parse_json(text: str | None) -> list | None:
         data = json.loads(text)
         if isinstance(data, list):
             return data
-        # some models wrap the array in a key
         if isinstance(data, dict):
             for v in data.values():
                 if isinstance(v, list):
@@ -169,7 +164,7 @@ def compute_idempotency_key(
     promise_text: str,
     created_at_window: datetime,
 ) -> str:
-    # truncate to the hour so re-ingests within the same hour deduplicate
+    # Truncate to the hour so re-ingests within the same hour deduplicate
     window = created_at_window.replace(minute=0, second=0, microsecond=0, tzinfo=timezone.utc)
     payload = f"{source_agent_id}|{promise_text.strip().lower()}|{window.isoformat()}"
     return hashlib.sha256(payload.encode()).hexdigest()

@@ -10,7 +10,7 @@ _USER_ID = uuid.UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
 _AGENT_ID = uuid.UUID("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb")
 
 
-def _make_extracted(confidence: float) -> ExtractedCommitment:
+def _make_extracted(confidence: float, classification: str = "genuine_commitment") -> ExtractedCommitment:
     return ExtractedCommitment(
         promise_text="I will send the report",
         due_condition=DueCondition(
@@ -18,6 +18,7 @@ def _make_extracted(confidence: float) -> ExtractedCommitment:
             trigger_description="by Friday",
         ),
         confidence=confidence,
+        classification=classification,
     )
 
 
@@ -82,3 +83,22 @@ def test_user_and_agent_ids_are_preserved():
 
 def test_empty_input_returns_empty_list():
     assert route_by_confidence([], _USER_ID, _AGENT_ID) == []
+
+
+def test_non_genuine_commitment_is_filtered_out():
+    """V1.5: items classified as non-genuine are not persisted."""
+    items = [
+        _make_extracted(0.95, classification="genuine_commitment"),
+        _make_extracted(0.90, classification="intention"),
+        _make_extracted(0.85, classification="question"),
+    ]
+    results = route_by_confidence(items, _USER_ID, _AGENT_ID)
+    assert len(results) == 1
+    assert results[0].classification == "genuine_commitment"
+
+
+def test_classification_preserved_on_commitment():
+    result = route_by_confidence(
+        [_make_extracted(0.95, classification="genuine_commitment")], _USER_ID, _AGENT_ID
+    )
+    assert result[0].classification == "genuine_commitment"
