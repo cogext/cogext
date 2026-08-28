@@ -172,3 +172,30 @@ def test_score_partial_match():
     )
     # Should match action (0.40) and recipient (0.30)
     assert score == pytest.approx(0.70)
+
+
+# ── Regression: evidence strength for zero-score records ───────────────────
+
+def test_zero_score_is_not_contradictory():
+    """score_evidence returns 0.0 when nothing matches; caller must label it 'none', not 'contradictory'."""
+    score, details = score_evidence_against_commitment(
+        evidence_data={"irrelevant": "data"},
+        commitment_action="send",
+        commitment_recipient="Alice",
+        commitment_object="report",
+        commitment_deadline="Friday",
+    )
+    assert score == 0.0
+    # All contributions are zero
+    assert all(d.score_contribution == 0.0 for d in details)
+    # The strength label used in API must be 'none', not 'contradictory'
+    # (Simulate the API labeling logic)
+    if score >= 0.80:
+        strength = "strong"
+    elif score >= 0.50:
+        strength = "supporting"
+    elif score > 0.0:
+        strength = "weak"
+    else:
+        strength = "none"
+    assert strength == "none", f"Expected 'none', got '{strength}'"

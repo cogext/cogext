@@ -144,6 +144,7 @@ CREATE OR REPLACE FUNCTION cogext_transition_commitment(
 RETURNS commitments LANGUAGE plpgsql AS $$
 DECLARE
     v_row            commitments%ROWTYPE;
+    v_old_status     TEXT;
     v_allowed        TEXT[];
     v_now            TIMESTAMPTZ := NOW();
 BEGIN
@@ -155,6 +156,9 @@ BEGIN
     IF NOT FOUND THEN
         RAISE EXCEPTION 'Commitment % not found', p_commitment_id;
     END IF;
+
+    -- Capture current status before UPDATE overwrites v_row via RETURNING
+    v_old_status := v_row.status;
 
     -- Validate transition
     v_allowed := CASE v_row.status
@@ -190,9 +194,52 @@ BEGIN
         previous_status, new_status, data, occurred_at, recorded_at, idempotency_key
     ) VALUES (
         uuid_generate_v4(), p_commitment_id, 'status_changed', p_actor,
-        v_row.status, p_target_status, p_data, v_now, v_now, p_idempotency_key
+        v_old_status, p_target_status, p_data, v_now, v_now, p_idempotency_key
     ) ON CONFLICT (idempotency_key) DO NOTHING;
 
     RETURN v_row;
 END;
 $$;
+
+
+-- ============================================================
+-- Post-audit fixes (001 patch)
+-- ============================================================
+
+-- Add self-referential FK constraints that were missing
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint WHERE conname = 'fk_commitments_supersedes'
+    ) THEN
+        ALTER TABLE commitments
+            ADD CONSTRAINT fk_commitments_supersedes
+            FOREIGN KEY (supersedes) REFERENCES commitments(id) ON DELETE SET NULL;
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint WHERE conname = 'fk_commitments_superseded_by'
+    ) THEN
+        ALTER TABLE commitments
+            ADD CONSTRAINT fk_commitments_superseded_by
+            FOREIGN KEY (superseded_by) REFERENCES commitments(id) ON DELETE SET NULL;
+    END IF;
+END $$;
+
+-- Missing created_at index (pagination / time-range queries)
+CREATE INDEX IF NOT EXISTS idx_commitments_created_at ON commitments (created_at);
+CREATE INDEX IF NOT EXISTS idx_episodic_log_created_at ON episodic_log (created_at);
+
+-- TRUNCATE protection: extend append-only enforcement to cover TRUNCATE
+-- (requires statement-level trigger)
+CREATE OR REPLACE FUNCTION cogext_events_no_truncate()
+RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    RAISE EXCEPTION 'TRUNCATE on commitment_events is not permitted (append-only table)';
+    RETURN NULL;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS trg_events_no_truncate ON commitment_events;
+CREATE TRIGGER trg_events_no_truncate
+    BEFORE TRUNCATE ON commitment_events
+    FOR EACH STATEMENT EXECUTE FUNCTION cogext_events_no_truncate();

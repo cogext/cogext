@@ -122,3 +122,52 @@ FROM commitments
 WHERE confidence >= 0.50
 GROUP BY confidence_bucket
 ORDER BY confidence_bucket;
+
+
+-- ============================================================
+-- Post-audit fixes (V1.7 patch)
+-- ============================================================
+
+-- Missing index: retry scheduler queries filter by next_retry_at
+CREATE INDEX IF NOT EXISTS idx_webhook_deliveries_retry
+    ON webhook_deliveries (next_retry_at)
+    WHERE status IN ('pending', 'retrying');
+
+-- Missing unique constraint: prevent duplicate delivery rows for same
+-- (webhook, event, attempt) from concurrent retry workers
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'uq_webhook_delivery_attempt'
+    ) THEN
+        ALTER TABLE webhook_deliveries
+            ADD CONSTRAINT uq_webhook_delivery_attempt
+            UNIQUE (webhook_id, event_id, attempt);
+    END IF;
+END $$;
+
+-- Missing unique constraint: prevent duplicate active subscriptions to
+-- the same endpoint
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'uq_webhook_endpoint_active'
+    ) THEN
+        CREATE UNIQUE INDEX uq_webhook_endpoint_active
+            ON webhook_subscriptions (endpoint)
+            WHERE active = TRUE;
+    END IF;
+END $$;
+
+-- Add created_at indexes for time-range queries on new V1.7 tables
+CREATE INDEX IF NOT EXISTS idx_human_reviews_created_at
+    ON human_reviews (created_at);
+
+CREATE INDEX IF NOT EXISTS idx_webhook_subscriptions_created_at
+    ON webhook_subscriptions (created_at);
+
+-- Note: webhook_subscriptions.secret_hash stores the plaintext signing
+-- secret (never returned in API responses). A future migration may rename
+-- this column to 'secret' for clarity.

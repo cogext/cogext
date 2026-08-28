@@ -65,11 +65,11 @@ def resolve_deadline(
             target_wd = _WEEKDAYS[wd_match.group(1)]
             current_wd = anchor_timestamp.weekday()
             days_ahead = (target_wd - current_wd) % 7 or 7
-            # "next <weekday>" always means ≥7 days
+            # "next <weekday>" always means the occurrence ≥7 days from now
             if re.search(r'\bnext\b', expr):
                 days_ahead = (target_wd - current_wd) % 7
-                if days_ahead == 0:
-                    days_ahead = 7
+                if days_ahead < 7:
+                    days_ahead += 7
             d = anchor_timestamp + timedelta(days=days_ahead)
             # check for EOD / 5pm qualifier
             if re.search(r'\b(end of day|eod|5\s*pm|17:00)\b', expr):

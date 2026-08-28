@@ -84,23 +84,25 @@ async def apply_refinement(
             "id", str(commitment_id)
         ).execute()
 
-    # Handle supersession link
-    if body.supersedes:
+    # Handle supersession link — mark the ORIGINAL commitment as superseded
+    if body.supersedes is not None:
         from app.core.state_machine import transition_commitment
+        original_id = body.supersedes
         try:
+            # Point the original at this new commitment
             await sb.table("commitments").update({
                 "superseded_by": str(commitment_id),
                 "updated_at": now,
-            }).eq("id", str(commitment_id)).execute()
-            # Mark original as superseded
+            }).eq("id", str(original_id)).execute()
+            # Transition the original through the state machine
             await transition_commitment(
-                commitment_id,
+                original_id,
                 "superseded",
                 actor=body.actor,
                 data={"superseded_by": str(commitment_id)},
             )
         except Exception as e:
-            logger.warning("Supersession transition failed: %s", e)
+            logger.warning("Supersession transition failed for %s: %s", original_id, e)
 
     # Insert refinement_applied event
     try:

@@ -73,7 +73,7 @@ async def create_review(body: CreateReviewRequest) -> HumanReview:
 
     # Transition commitment to pending_review if currently open/detected
     current = c_resp.data[0]["status"]
-    if current in {"detected", "open"}:
+    if current == "detected":  # only detected→pending_review is a valid transition
         try:
             await transition_commitment(
                 body.commitment_id, "pending_review",
@@ -83,7 +83,7 @@ async def create_review(body: CreateReviewRequest) -> HumanReview:
         except Exception as e:
             logger.warning("Could not transition to pending_review: %s", e)
 
-    await _insert_event(sb, str(body.commitment_id), "status_changed", "review_api",
+    await _insert_event(sb, str(body.commitment_id), "review_created", "review_api",
                         {"review_id": str(rev_id), "reason_code": body.reason_code})
 
     resp = await sb.table("human_reviews").select("*").eq("id", str(rev_id)).execute()
@@ -153,7 +153,8 @@ async def accept_review(review_id: uuid.UUID, body: AcceptReviewRequest) -> Huma
             data={"review_id": str(review_id), "resolution": body.resolution},
         )
     except Exception as e:
-        logger.warning("post-accept transition failed: %s", e)
+        logger.error("accept_review: commitment state transition failed: %s", e)
+        raise HTTPException(status_code=409, detail=f"Cannot accept: commitment state transition failed: {e}")
 
     await _insert_event(sb, row["commitment_id"], "review_accepted", "reviewer",
                         {"review_id": str(review_id)})

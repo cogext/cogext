@@ -86,3 +86,37 @@ def test_ambiguous_returns_llm_fallback_method():
     r = resolve_deadline("sometime in the indefinite future", _ANCHOR)
     # Either resolved via LLM fallback or unresolved
     assert r.resolution_method in ("llm_fallback", "deterministic")
+
+
+# ── Regression tests for "next <weekday>" bug fix ──────────────────────────
+
+def test_next_tuesday_from_wednesday():
+    """'next Tuesday' from Wednesday must be 6 days ahead (next week), not same week."""
+    anchor = datetime(2026, 8, 26, 9, 0, tzinfo=timezone.utc)  # Wednesday
+    result = resolve_deadline("next tuesday", anchor)
+    delta = (result.resolved_deadline - anchor).days
+    assert delta >= 7, f"Expected ≥7 days for 'next tuesday' from Wednesday, got {delta}"
+
+
+def test_next_monday_from_friday():
+    """'next Monday' from Friday: Monday is 3 days ahead in same week → must jump to 10 days."""
+    anchor = datetime(2026, 8, 28, 9, 0, tzinfo=timezone.utc)  # Friday
+    result = resolve_deadline("next monday", anchor)
+    delta = (result.resolved_deadline - anchor).days
+    assert delta >= 7, f"Expected ≥7 days for 'next monday' from Friday, got {delta}"
+
+
+def test_next_friday_from_friday():
+    """'next Friday' from Friday (same day): must be exactly 7 days ahead."""
+    anchor = datetime(2026, 8, 28, 9, 0, tzinfo=timezone.utc)  # Friday
+    result = resolve_deadline("next friday", anchor)
+    delta = (result.resolved_deadline - anchor).days
+    assert delta == 7, f"Expected 7 days for 'next friday' from Friday, got {delta}"
+
+
+def test_by_weekday_without_next_uses_nearest():
+    """'by Tuesday' (no 'next') from Friday resolves to coming Tuesday (4 days)."""
+    anchor = datetime(2026, 8, 28, 9, 0, tzinfo=timezone.utc)  # Friday
+    result = resolve_deadline("by tuesday", anchor)
+    delta = (result.resolved_deadline - anchor).days
+    assert delta == 4, f"Expected 4 days for 'by tuesday' from Friday, got {delta}"

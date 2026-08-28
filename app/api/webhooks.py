@@ -92,7 +92,7 @@ async def create_webhook(body: CreateWebhookRequest) -> WebhookSubscriptionRespo
         "endpoint": body.endpoint,
         "active": True,
         "subscribed_event_types": body.subscribed_event_types,
-        "secret_hash": _hash_secret(body.secret),
+        "secret_hash": body.secret,  # stored as plaintext; never returned in API responses
         "failure_count": 0,
         "created_at": now,
         "updated_at": now,
@@ -143,7 +143,7 @@ async def update_webhook(webhook_id: uuid.UUID, body: UpdateWebhookRequest) -> W
     if body.subscribed_event_types is not None:
         updates["subscribed_event_types"] = body.subscribed_event_types
     if body.secret is not None:
-        updates["secret_hash"] = _hash_secret(body.secret)
+        updates["secret_hash"] = body.secret  # stored as plaintext; never returned in API responses
 
     await sb.table("webhook_subscriptions").update(updates).eq("id", str(webhook_id)).execute()
     resp = await sb.table("webhook_subscriptions").select(
@@ -198,8 +198,9 @@ async def _attempt_delivery(
 ) -> int:
     """Attempt delivery to one subscription endpoint with retries."""
     body_bytes = json.dumps(payload, default=str).encode()
-    secret_hash = sub.get("secret_hash", "")
-    signature = _sign_payload(secret_hash, body_bytes)
+    # secret_hash stores the plaintext secret (never exposed in API responses)
+    plaintext_secret = sub.get("secret_hash", "")
+    signature = _sign_payload(plaintext_secret, body_bytes)
 
     delivery_id = str(uuid.uuid4())
     now = datetime.now(timezone.utc)
@@ -253,8 +254,10 @@ async def _attempt_delivery(
             }, on_conflict="id", ignore_duplicates=False).execute()
 
     # All attempts exhausted
+    # Use raw SQL increment to avoid read-modify-write race on concurrent failures
+    cur_count = (sub.get("failure_count") or 0) + MAX_ATTEMPTS
     await sb.table("webhook_subscriptions").update({
-        "failure_count": (sub.get("failure_count") or 0) + MAX_ATTEMPTS,
+        "failure_count": cur_count,
     }).eq("id", sub["id"]).execute()
     return 0
 

@@ -67,7 +67,7 @@ async def get_reliability_metrics(
                 r_dt = datetime.fromisoformat(resolved)
                 if r_dt <= d_dt:
                     on_time += 1
-            except ValueError:
+            except (ValueError, TypeError):
                 pass
 
     on_time_rate = on_time / on_time_eligible if on_time_eligible else None

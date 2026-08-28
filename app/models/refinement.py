@@ -34,7 +34,7 @@ class ApplyRefinementRequest(BaseModel):
     commitment_id: UUID
     changes: list[dict[str, Any]]      # [{field, new_value, change_type, reason}]
     actor: str
-    supersedes: bool = False
+    supersedes: UUID | None = None  # UUID of the commitment this one supersedes
 
 
 class RefinementHistory(BaseModel):

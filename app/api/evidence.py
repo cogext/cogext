@@ -49,7 +49,7 @@ async def submit_evidence(
     elif score > 0.0:
         strength = "weak"
     else:
-        strength = "contradictory"
+        strength = "none"
 
     # Idempotency key for external evidence
     idem_key = None
