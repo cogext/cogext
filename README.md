@@ -62,7 +62,7 @@ The core design principle is **read/write asymmetry**: ingestion is a write-heav
 
 The schema and extraction logic were independently validated — the trigger taxonomy (`time`, `event_implicit`, `event_external`, `state`) and the commitment lifecycle emerged from a thread on r/AI_Agents where 8 production engineers converged on the same design without coordination. That convergence is a signal the abstraction is right.
 
-The extractor uses structured LLM inference (Groq Llama 3.3 70B) with a retry-on-parse-failure loop and falls back to `pending_review` on ambiguous output rather than silently dropping commitments.
+The extractor uses structured LLM inference (Groq `openai/gpt-oss-120b`) with a retry-on-parse-failure loop and falls back to `pending_review` on ambiguous output rather than silently dropping commitments.
 
 ---
 
@@ -104,7 +104,7 @@ All 41 tests pass.
 | `SUPABASE_SERVICE_ROLE_KEY` | yes | — | Service role key (not anon key) |
 | `LLM_PROVIDER` | no | `groq` | `groq` or `openai` |
 | `GROQ_API_KEY` | yes (if groq) | — | |
-| `GROQ_MODEL` | no | `llama-3.3-70b-versatile` | |
+| `GROQ_MODEL` | no | `openai/gpt-oss-120b` | `llama-3.3-70b-versatile` was deprecated by Groq on 2026-06-17 |
 | `ENV` | no | `development` | Set to `production` on Render |
 
 ---
@@ -113,7 +113,7 @@ All 41 tests pass.
 
 - **API** — FastAPI, Python 3.12
 - **Database** — Supabase (Postgres), accessed via supabase-py
-- **LLM** — Groq, Llama 3.3 70B Versatile
+- **LLM** — Groq, `openai/gpt-oss-120b`
 - **Hosting** — Render (backend)
 
 ---
