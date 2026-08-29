@@ -30,8 +30,9 @@ This is the data layer that lets you build trust dashboards, SLA monitors, or au
 |---|---|
 | Landing | https://cogextai.com |
 | Live API | https://cogext.onrender.com |
+| API Docs | https://cogext.onrender.com/docs |
 | SDK | Python — `pip install -e sdk/` |
-| Tests | 41/41 passing |
+| Tests | 153/153 passing |
 
 ---
 
@@ -60,61 +61,76 @@ output = tracked.run("your prompt here")
 
 The core design principle is **read/write asymmetry**: ingestion is a write-heavy, low-latency path (fast LLM extraction, immediate Postgres write), while queries are read-heavy and can be cached or pre-aggregated. These two paths are kept strictly separate.
 
-The schema and extraction logic were independently validated — the trigger taxonomy (`time`, `event_implicit`, `event_external`, `state`) and the commitment lifecycle emerged from a thread on r/AI_Agents where 8 production engineers converged on the same design without coordination. That convergence is a signal the abstraction is right.
-
 The extractor uses structured LLM inference (Groq Llama 3.3 70B) with a retry-on-parse-failure loop and falls back to `pending_review` on ambiguous output rather than silently dropping commitments.
 
 ---
 
-## For Contributors — Local Development
+## Local Development
 
 ```bash
 git clone https://github.com/cogext/cogext.git
-cd cogext-backend
+cd cogext
 python -m venv venv
 source venv/bin/activate       # Windows: venv\Scripts\activate
 pip install -r requirements.txt
 cp .env.example .env
-# Fill in .env — see environment variables below
+# Fill in .env with your Supabase + Groq credentials
 uvicorn app.main:app --reload
 ```
 
-Health check: https://cogext.onrender.com/health
+API runs at `http://localhost:8000` — interactive docs at `http://localhost:8000/docs`.
 
 ### Running Tests
 
 ```bash
-# Unit tests only (no DB required)
+# Unit + integration tests (requires .env with live Supabase)
 pytest app/tests/ -v
 
-# Full suite including DB integration tests
-RUN_DB_TESTS=true pytest app/tests/ -v
+# Skip DB tests (no credentials needed)
+pytest app/tests/ -v -k "not db"
 ```
 
-All 41 tests pass.
+All 153 tests pass.
 
 ---
 
 ## Environment Variables
 
-| Variable | Required | Default | Notes |
-|---|---|---|---|
-| `DATABASE_URL` | yes | — | Supabase pooler URL (port 6543) |
-| `SUPABASE_URL` | yes | — | Project URL from Supabase dashboard |
-| `SUPABASE_SERVICE_ROLE_KEY` | yes | — | Service role key (not anon key) |
-| `LLM_PROVIDER` | no | `groq` | `groq` or `openai` |
-| `GROQ_API_KEY` | yes (if groq) | — | |
-| `GROQ_MODEL` | no | `llama-3.3-70b-versatile` | |
-| `ENV` | no | `development` | Set to `production` on Render |
+| Variable | Required | Notes |
+|---|---|---|
+| `DATABASE_URL` | yes | Supabase pooler URL (port 6543, not 5432) |
+| `SUPABASE_URL` | yes | Project URL from Supabase dashboard |
+| `SUPABASE_SERVICE_ROLE_KEY` | yes | Service role key — **not** the anon key |
+| `LLM_PROVIDER` | no | `groq` (default) or `openai` |
+| `GROQ_API_KEY` | yes (if groq) | From console.groq.com |
+| `GROQ_MODEL` | no | Default: `llama-3.3-70b-versatile` |
+| `ENV` | no | Set to `production` on Render |
+
+Copy `.env.example` → `.env` and fill in your values.
 
 ---
 
 ## Tech Stack
 
 - **API** — FastAPI, Python 3.12
-- **Database** — Supabase (Postgres), accessed via supabase-py
+- **Database** — Supabase (Postgres + PostgREST)
 - **LLM** — Groq, Llama 3.3 70B Versatile
-- **Hosting** — Render (backend)
+- **Hosting** — Render (API), Cloudflare Workers (uptime pinger)
+
+---
+
+## Repo Structure
+
+```
+app/
+  api/          # FastAPI routes (ingest, query, state transitions)
+  core/         # Extractor, state machine, idempotency
+  models/       # Pydantic models (Commitment, Evidence, etc.)
+  tests/        # 153 tests — unit + acceptance + state machine
+pinger/         # Cloudflare Worker — keeps Render awake (cron */10 min)
+sdk/            # Python SDK — wrap any agent with track()
+migrations/     # Supabase SQL migrations
+```
 
 ---
 
@@ -122,10 +138,9 @@ All 41 tests pass.
 
 | Version | Status | Focus |
 |---|---|---|
-| v1 | Done | Ingest, extract, store, SDK |
-| v1.1 | Planned | Contradiction detection |
-| v1.5 | Planned | Semantic trigger matching |
-| v2 | Planned | Multi-agent commitment graphs |
+| v1.7 | ✅ Done | Ingest, extract, store, SDK, 153 tests |
+| v1.8 | Planned | RLS policies + multi-tenant auth |
+| v2 | Planned | Contradiction detection + semantic trigger matching |
 | v3 | Planned | Dashboard + alerting UI |
 
 ---
@@ -134,4 +149,4 @@ All 41 tests pass.
 
 MIT
 
-Built solo in Kerala 🇮🇳 — [cogextai.com](https://cogextai.com)
+Built in Kerala 🇮🇳 — [cogextai.com](https://cogextai.com)
