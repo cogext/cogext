@@ -1,14 +1,15 @@
-"""COGEXT V1.7 – Application entry point."""
+"""COGEXT V1.8 – Application entry point."""
 import json
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import Depends, FastAPI, HTTPException, Query
 
 from app.api.calibration import router as calibration_router
 from app.api.dependencies import router as dependencies_router
 from app.api.evidence import router as evidence_router
 from app.api.events import router as events_router
 from app.api.ingest import router as ingest_router
+from app.api.keys import router as keys_router
 from app.api.privacy import router as privacy_router
 from app.api.recall import router as recall_router
 from app.api.refinements import router as refinements_router
@@ -16,6 +17,7 @@ from app.api.reliability import router as reliability_router
 from app.api.reviews import router as reviews_router
 from app.api.status import router as status_router
 from app.api.webhooks import router as webhooks_router
+from app.core.auth import Account, get_current_account
 from app.core.extractor import extract_commitments
 from app.core.lifecycle import router as lifecycle_router
 from app.db.connection import close_supabase, get_supabase, init_supabase
@@ -29,35 +31,34 @@ async def lifespan(app: FastAPI):
     await close_supabase()
 
 
-app = FastAPI(title="COGEXT", version="1.7.0", lifespan=lifespan)
+app = FastAPI(title="COGEXT", version="1.8.0", lifespan=lifespan)
 
 _V1 = "/api/v1"
 
-# Original routes
-app.include_router(ingest_router,       prefix=_V1, tags=["ingest"])
-app.include_router(recall_router,       prefix=_V1, tags=["recall"])
-app.include_router(status_router,       prefix=_V1, tags=["status"])
-app.include_router(lifecycle_router,    prefix=_V1, tags=["admin"])
+# ── Public routes (no auth) ───────────────────────────────────────────────────
+app.include_router(keys_router, prefix=_V1)  # /api/v1/keys/signup is public
 
-# V1.5
-app.include_router(events_router,       prefix=_V1, tags=["events"])
+# ── Protected routes (require API key) ────────────────────────────────────────
+_auth = {"dependencies": [Depends(get_current_account)]}
 
-# V1.6
-app.include_router(evidence_router,     prefix=_V1, tags=["evidence"])
-app.include_router(dependencies_router, prefix=_V1, tags=["dependencies"])
-app.include_router(reliability_router,  prefix=_V1, tags=["reliability"])
-
-# V1.7
-app.include_router(reviews_router,      prefix=_V1, tags=["reviews"])
-app.include_router(webhooks_router,     prefix=_V1, tags=["webhooks"])
-app.include_router(calibration_router,  prefix=_V1, tags=["calibration"])
-app.include_router(refinements_router,  prefix=_V1, tags=["refinements"])
-app.include_router(privacy_router,      prefix=_V1, tags=["privacy"])
+app.include_router(ingest_router,       prefix=_V1, tags=["ingest"],       **_auth)
+app.include_router(recall_router,       prefix=_V1, tags=["recall"],       **_auth)
+app.include_router(status_router,       prefix=_V1, tags=["status"],       **_auth)
+app.include_router(lifecycle_router,    prefix=_V1, tags=["admin"],        **_auth)
+app.include_router(events_router,       prefix=_V1, tags=["events"],       **_auth)
+app.include_router(evidence_router,     prefix=_V1, tags=["evidence"],     **_auth)
+app.include_router(dependencies_router, prefix=_V1, tags=["dependencies"], **_auth)
+app.include_router(reliability_router,  prefix=_V1, tags=["reliability"],  **_auth)
+app.include_router(reviews_router,      prefix=_V1, tags=["reviews"],      **_auth)
+app.include_router(webhooks_router,     prefix=_V1, tags=["webhooks"],     **_auth)
+app.include_router(calibration_router,  prefix=_V1, tags=["calibration"],  **_auth)
+app.include_router(refinements_router,  prefix=_V1, tags=["refinements"],  **_auth)
+app.include_router(privacy_router,      prefix=_V1, tags=["privacy"],      **_auth)
 
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "version": "1.7.0"}
+    return {"status": "ok", "version": "1.8.0"}
 
 
 @app.get("/db-check")
