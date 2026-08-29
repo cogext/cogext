@@ -1,6 +1,6 @@
 import logging
 import uuid
-from typing import Literal
+from typing import Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
@@ -26,7 +26,7 @@ async def get_commitments(
     source_agent_id: uuid.UUID | None = None,
     target_agent_id: uuid.UUID | None = None,
     record_key: str | None = None,
-    status: _STATUS_VALUES = Query(default="open"),
+    status: _STATUS_VALUES | None = Query(default=None),
     limit: int = Query(default=50, ge=1, le=200),
 ) -> dict:
     sb = get_supabase()
@@ -35,9 +35,11 @@ async def get_commitments(
         sb.table("commitments")
         .select(_COLS)
         .eq("user_id", account.account_id)
-        .eq("status", status)
+        
     )
 
+    if status is not None:
+        query = query.eq("status", status)
     if source_agent_id is not None:
         query = query.eq("source_agent_id", str(source_agent_id))
     if target_agent_id is not None:
