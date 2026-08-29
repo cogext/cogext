@@ -38,3 +38,5 @@ htmlcov/
 # Logs
 *.log
 .env
+.env.save
+*.save
