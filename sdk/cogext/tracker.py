@@ -18,15 +18,18 @@ _INTERCEPT = frozenset({"run", "invoke", "chat", "complete"})
 def track(
     agent: Any,
     api_key: str,
-    user_id: str | uuid.UUID,
-    agent_id: str | uuid.UUID,
+    agent_id: str | uuid.UUID | None = None,
+    user_id: str | uuid.UUID | None = None,  # deprecated — auto-derived from API key
     base_url: str | None = None,
 ) -> "TrackedAgent":
-    kwargs: dict[str, Any] = {"api_key": api_key, "user_id": user_id}
+    kwargs: dict[str, Any] = {"api_key": api_key}
+    if user_id is not None:
+        kwargs["user_id"] = user_id
     if base_url:
         kwargs["base_url"] = base_url
     client = CogextClient(**kwargs)
-    return TrackedAgent(agent, client, str(agent_id))
+    _agent_id = str(agent_id) if agent_id else str(uuid.uuid4())
+    return TrackedAgent(agent, client, _agent_id)
 
 
 class TrackedAgent:

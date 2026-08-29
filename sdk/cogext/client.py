@@ -12,23 +12,26 @@ import httpx
 
 from .exceptions import CogextAPIError, CogextConfigError
 
-_DEFAULT_BASE_URL = "http://localhost:8000/api/v1"
+_DEFAULT_BASE_URL = "https://cogext.onrender.com/api/v1"
 
 
 class CogextClient:
     def __init__(
         self,
         api_key: str,
-        user_id: uuid.UUID | str,
+        user_id: uuid.UUID | str | None = None,  # auto-derived from API key
         base_url: str = _DEFAULT_BASE_URL,
         timeout: float = 5.0,
     ) -> None:
         if not api_key or not isinstance(api_key, str):
             raise CogextConfigError("api_key must be a non-empty string")
-        try:
-            self._user_id = str(uuid.UUID(str(user_id)))
-        except (ValueError, AttributeError):
-            raise CogextConfigError(f"user_id is not a valid UUID: {user_id!r}")
+        if user_id is not None:
+            try:
+                self._user_id = str(uuid.UUID(str(user_id)))
+            except (ValueError, AttributeError):
+                raise CogextConfigError(f"user_id is not a valid UUID: {user_id!r}")
+        else:
+            self._user_id = None
 
         self._base_url = base_url.rstrip("/")
         self._headers = {
@@ -52,7 +55,6 @@ class CogextClient:
         source_message_id: str | None = None,
     ) -> list[dict[str, Any]]:
         payload: dict[str, Any] = {
-            "user_id": self._user_id,
             "source_agent_id": str(source_agent_id),
             "message": message,
             "source_type": source_type,
@@ -84,7 +86,6 @@ class CogextClient:
         limit: int = 50,
     ) -> list[dict[str, Any]]:
         params: dict[str, Any] = {
-            "user_id": self._user_id,
             "status": status,
             "limit": limit,
         }
@@ -236,7 +237,7 @@ class CogextClient:
         source_agent_id: str | uuid.UUID | None = None,
         since: str | None = None,
     ) -> dict[str, Any]:
-        params: dict[str, Any] = {"user_id": self._user_id}
+        params: dict[str, Any] = {}
         if source_agent_id:
             params["source_agent_id"] = str(source_agent_id)
         if since:
@@ -351,7 +352,7 @@ class CogextClient:
     # -------------------------------------------------------------------------
 
     async def get_calibration(self) -> dict[str, Any]:
-        params = {"user_id": self._user_id}
+        params = {}
         async with httpx.AsyncClient(timeout=self._timeout) as http:
             resp = await http.get(
                 f"{self._base_url}/calibration",
