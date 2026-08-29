@@ -56,8 +56,7 @@ def clean_db():
     sb = create_client(settings.SUPABASE_URL, settings.SUPABASE_SERVICE_ROLE_KEY)
 
     def _wipe():
-        sb.table("commitments").delete().eq("user_id", str(TEST_USER_ID)).execute()
-        sb.table("episodic_log").delete().eq("user_id", str(TEST_USER_ID)).execute()
+        sb.rpc("cogext_test_cleanup", {"p_user_id": str(TEST_USER_ID)}).execute()
 
     _wipe()
     yield

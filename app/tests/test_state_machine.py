@@ -18,6 +18,7 @@ from app.core.state_machine import validate_transition
     ("open",           "fulfilled"),
     ("open",           "failed"),
     ("open",           "cancelled"),
+    ("open",           "expired"),
     ("open",           "superseded"),
     ("open",           "contradicted"),
     ("open",           "blocked"),
@@ -51,7 +52,6 @@ def test_valid_transition(frm, to):
     ("cancelled",   "open"),
     ("contradicted","open"),
     ("superseded",  "open"),
-    ("open",        "expired"),       # must go through overdue
     ("open",        "overdue"),       # must go through due
     ("detected",    "fulfilled"),
     ("pending_review", "fulfilled"),

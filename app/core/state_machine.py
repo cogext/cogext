@@ -28,7 +28,7 @@ logger = logging.getLogger(__name__)
 _TRANSITIONS: dict[CommitmentStatus, frozenset[CommitmentStatus]] = {
     "detected":        frozenset({"open", "pending_review", "cancelled"}),
     "pending_review":  frozenset({"open", "cancelled"}),
-    "open":            frozenset({"due", "fulfilled", "failed", "cancelled",
+    "open":            frozenset({"due", "fulfilled", "failed", "expired", "cancelled",
                                   "superseded", "contradicted", "blocked"}),
     "due":             frozenset({"overdue", "fulfilled", "failed", "cancelled",
                                   "superseded", "contradicted", "blocked"}),

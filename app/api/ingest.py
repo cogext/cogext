@@ -69,39 +69,64 @@ async def ingest(body: IngestRequest) -> IngestResponse:
                 "recipient": c.recipient,
                 "due_condition": c.due_condition.model_dump(mode="json"),
                 "deadline_expression": c.deadline_expression,
-                "conditions": c.conditions,
+                "conditions": c.conditions or [],
                 "status": c.status,
                 "confidence": c.confidence,
                 "classification": c.classification,
                 "idempotency_key": c.idempotency_key,
                 "created_at": now,
                 "updated_at": now,
+                # Always set these so new rows never have NULL columns
+                "child_commitment_ids": [str(x) for x in c.child_commitment_ids] if c.child_commitment_ids else [],
+                "evidence_requirements": [e.model_dump() for e in c.evidence_requirements] if c.evidence_requirements else [],
+                "evidence_found": c.evidence_found or [],
+                "verification_status": c.verification_status or "unverified",
+                "priority": c.priority or "medium",
+                "metadata": c.metadata or {},
             }
-            await sb.table("commitments").upsert(
+            result = await sb.table("commitments").upsert(
                 row,
                 on_conflict="idempotency_key",
                 ignore_duplicates=True,
             ).execute()
-            saved.append(c)
-            logger.info("commitment saved id=%s status=%s", c.id, c.status)
 
-            # Step 5: insert 'detected' event (best-effort)
-            try:
-                await sb.table("commitment_events").insert({
-                    "id": str(uuid.uuid4()),
-                    "commitment_id": str(c.id),
-                    "event_type": "detected",
-                    "actor": "ingest_api",
-                    "data": {
-                        "confidence": c.confidence,
-                        "classification": c.classification,
-                        "trace_id": str(trace_id),
-                    },
-                    "occurred_at": now,
-                    "recorded_at": now,
-                }).execute()
-            except Exception as ev_err:
-                logger.warning("Event insert failed cid=%s: %s", c.id, ev_err)
+            is_new = bool(result.data)
+            if is_new:
+                commitment_to_save = c
+            else:
+                # No-op upsert — a row with this idempotency_key already exists.
+                # Fetch it so callers get the real persisted id, not a stale UUID.
+                existing = await sb.table("commitments").select("*") \
+                    .eq("idempotency_key", c.idempotency_key) \
+                    .maybe_single().execute()
+                if existing and existing.data:
+                    commitment_to_save = Commitment(**existing.data)
+                else:
+                    commitment_to_save = c  # fallback — shouldn't happen
+                logger.info("commitment deduplicated id=%s", commitment_to_save.id)
+
+            saved.append(commitment_to_save)
+            logger.info("commitment saved id=%s status=%s is_new=%s",
+                        commitment_to_save.id, commitment_to_save.status, is_new)
+
+            # Step 5: insert 'detected' event (best-effort, new inserts only)
+            if is_new:
+                try:
+                    await sb.table("commitment_events").insert({
+                        "id": str(uuid.uuid4()),
+                        "commitment_id": str(commitment_to_save.id),
+                        "event_type": "detected",
+                        "actor": "ingest_api",
+                        "data": {
+                            "confidence": commitment_to_save.confidence,
+                            "classification": commitment_to_save.classification,
+                            "trace_id": str(trace_id),
+                        },
+                        "occurred_at": now,
+                        "recorded_at": now,
+                    }).execute()
+                except Exception as ev_err:
+                    logger.warning("Event insert failed cid=%s: %s", commitment_to_save.id, ev_err)
 
         except Exception as e:
             logger.error("commitment insert failed id=%s: %s", c.id, e)

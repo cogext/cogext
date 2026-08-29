@@ -120,7 +120,9 @@ async def test_e2e_ingest_evidence_fulfill(test_client, clean_db):
 @skip_without_db
 @pytest.mark.asyncio
 async def test_dependency_blocks_and_unblocks(test_client, clean_db):
-    with patch("app.core.extractor.extract_completion", return_value=_MOCK_DEPLOYMENT_REPORT):
+    # Use side_effect so each call returns a distinct promise_text → distinct idempotency_key
+    with patch("app.core.extractor.extract_completion",
+               side_effect=[_MOCK_DEPLOYMENT_REPORT, _MOCK_CI_COMMITMENT]):
         resp_a = await test_client.post(f"{_BASE}/ingest", json={
             "user_id": str(TEST_USER_ID),
             "source_agent_id": str(TEST_SOURCE_AGENT_ID),

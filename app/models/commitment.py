@@ -5,7 +5,7 @@ from datetime import datetime
 from typing import Any, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 # ---------------------------------------------------------------------------
@@ -70,6 +70,37 @@ class EvidenceRequirement(BaseModel):
 # ---------------------------------------------------------------------------
 
 class Commitment(BaseModel):
+    # ---------------------------------------------------------------------------
+    # Coerce DB NULLs to model defaults (old rows may lack column defaults)
+    # ---------------------------------------------------------------------------
+    @model_validator(mode="before")
+    @classmethod
+    def _coerce_nulls(cls, data: dict) -> dict:
+        if not isinstance(data, dict):
+            return data
+        _list_defaults: dict[str, list] = {
+            "child_commitment_ids": [],
+            "evidence_requirements": [],
+            "evidence_found": [],
+            "conditions": [],
+        }
+        _scalar_defaults: dict[str, object] = {
+            "verification_status": "unverified",
+            "priority": "medium",
+            "classification": "genuine_commitment",
+            "source_type": "agent_message",
+            "status": "open",
+            "metadata": {},
+            "due_condition": None,  # keep None for optional handling below
+        }
+        for field, default in _list_defaults.items():
+            if data.get(field) is None:
+                data[field] = default
+        for field, default in _scalar_defaults.items():
+            if data.get(field) is None and default is not None:
+                data[field] = default
+        return data
+
     # Identity
     id: UUID | None = None
     tenant_id: UUID | None = None
