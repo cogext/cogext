@@ -2,8 +2,9 @@ import logging
 import uuid
 from typing import Literal
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 
+from app.core.auth import Account, get_current_account
 from app.db.connection import get_supabase
 from app.db.row_helpers import row_to_dict
 from app.models.commitment import Commitment
@@ -21,7 +22,7 @@ _COLS = (
 
 @router.get("/commitments")
 async def get_commitments(
-    user_id: uuid.UUID,
+    account: Account = Depends(get_current_account),
     source_agent_id: uuid.UUID | None = None,
     target_agent_id: uuid.UUID | None = None,
     record_key: str | None = None,
@@ -33,7 +34,7 @@ async def get_commitments(
     query = (
         sb.table("commitments")
         .select(_COLS)
-        .eq("user_id", str(user_id))
+        .eq("user_id", account.account_id)
         .eq("status", status)
     )
 

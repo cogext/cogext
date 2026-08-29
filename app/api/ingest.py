@@ -1,10 +1,11 @@
-"""V1.5 – Ingest API: extract commitments and persist via state machine."""
+"""V1.8 – Ingest API: user_id auto-scoped from API key."""
 import logging
 import uuid
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 
+from app.core.auth import Account, get_current_account
 from app.core.extractor import extract_commitments
 from app.core.scorer import route_by_confidence
 from app.db.connection import get_supabase
@@ -15,16 +16,18 @@ router = APIRouter()
 
 
 @router.post("/ingest", response_model=IngestResponse)
-async def ingest(body: IngestRequest) -> IngestResponse:
+async def ingest(body: IngestRequest, account: Account = Depends(get_current_account)) -> IngestResponse:
     sb = get_supabase()
 
-    # Step 1: log raw message to episodic_log
+    # user_id always comes from the API key — ignore whatever is in the body
+    user_id = uuid.UUID(account.account_id)
+
     trace_id = uuid.uuid4()
     now = datetime.now(timezone.utc).isoformat()
     try:
         await sb.table("episodic_log").insert({
             "id": str(uuid.uuid4()),
-            "user_id": str(body.user_id),
+            "user_id": str(user_id),
             "agent_id": str(body.source_agent_id),
             "trace_id": str(trace_id),
             "raw_content": body.message,
@@ -34,14 +37,12 @@ async def ingest(body: IngestRequest) -> IngestResponse:
         logger.error("episodic_log insert failed: %s", e)
         raise HTTPException(status_code=500, detail="Failed to log message")
 
-    # Step 2: extract commitments from message
     extracted = await extract_commitments(body.message)
     logger.info("extracted %d commitment(s) from message", len(extracted))
 
-    # Step 3: score and build full Commitment objects
     commitments = route_by_confidence(
         extracted,
-        user_id=body.user_id,
+        user_id=user_id,
         source_agent_id=body.source_agent_id,
         target_agent_id=body.target_agent_id,
         record_key=body.record_key,
@@ -50,13 +51,12 @@ async def ingest(body: IngestRequest) -> IngestResponse:
         source_message_id=body.source_message_id,
     )
 
-    # Step 4: persist each commitment (idempotent via upsert on idempotency_key)
     saved: list[Commitment] = []
     for c in commitments:
         try:
             row = {
                 "id": str(c.id),
-                "user_id": str(c.user_id),
+                "user_id": str(user_id),
                 "source_agent_id": str(c.source_agent_id),
                 "target_agent_id": str(c.target_agent_id) if c.target_agent_id else None,
                 "record_key": c.record_key,
@@ -76,7 +76,6 @@ async def ingest(body: IngestRequest) -> IngestResponse:
                 "idempotency_key": c.idempotency_key,
                 "created_at": now,
                 "updated_at": now,
-                # Always set these so new rows never have NULL columns
                 "child_commitment_ids": [str(x) for x in c.child_commitment_ids] if c.child_commitment_ids else [],
                 "evidence_requirements": [e.model_dump() for e in c.evidence_requirements] if c.evidence_requirements else [],
                 "evidence_found": c.evidence_found or [],
@@ -85,31 +84,23 @@ async def ingest(body: IngestRequest) -> IngestResponse:
                 "metadata": c.metadata or {},
             }
             result = await sb.table("commitments").upsert(
-                row,
-                on_conflict="idempotency_key",
-                ignore_duplicates=True,
+                row, on_conflict="idempotency_key", ignore_duplicates=True,
             ).execute()
 
             is_new = bool(result.data)
             if is_new:
                 commitment_to_save = c
             else:
-                # No-op upsert — a row with this idempotency_key already exists.
-                # Fetch it so callers get the real persisted id, not a stale UUID.
                 existing = await sb.table("commitments").select("*") \
-                    .eq("idempotency_key", c.idempotency_key) \
-                    .maybe_single().execute()
+                    .eq("idempotency_key", c.idempotency_key).maybe_single().execute()
                 if existing and existing.data:
                     commitment_to_save = Commitment(**existing.data)
                 else:
-                    commitment_to_save = c  # fallback — shouldn't happen
+                    commitment_to_save = c
                 logger.info("commitment deduplicated id=%s", commitment_to_save.id)
 
             saved.append(commitment_to_save)
-            logger.info("commitment saved id=%s status=%s is_new=%s",
-                        commitment_to_save.id, commitment_to_save.status, is_new)
 
-            # Step 5: insert 'detected' event (best-effort, new inserts only)
             if is_new:
                 try:
                     await sb.table("commitment_events").insert({

@@ -166,7 +166,7 @@ class Commitment(BaseModel):
 # ---------------------------------------------------------------------------
 
 class IngestRequest(BaseModel):
-    user_id: UUID
+    user_id: UUID | None = None  # auto-filled from API key
     source_agent_id: UUID
     message: str
     target_agent_id: UUID | None = None
