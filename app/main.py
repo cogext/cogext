@@ -3,6 +3,7 @@ import json
 from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI, HTTPException, Query
+from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.calibration import router as calibration_router
 from app.api.dependencies import router as dependencies_router
@@ -32,6 +33,14 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="COGEXT", version="1.8.0", lifespan=lifespan)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["https://cogextai.com", "https://www.cogextai.com", "https://cogextai.pages.dev"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 _V1 = "/api/v1"
 
