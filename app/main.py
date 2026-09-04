@@ -1,4 +1,4 @@
-"""COGEXT V1.8 – Application entry point."""
+"""COGEXT V1.9 – Application entry point."""
 import json
 from contextlib import asynccontextmanager
 
@@ -32,7 +32,7 @@ async def lifespan(app: FastAPI):
     await close_supabase()
 
 
-app = FastAPI(title="COGEXT", version="1.8.0", lifespan=lifespan)
+app = FastAPI(title="COGEXT", version="1.9.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -65,20 +65,33 @@ app.include_router(refinements_router,  prefix=_V1, tags=["refinements"],  **_au
 app.include_router(privacy_router,      prefix=_V1, tags=["privacy"],      **_auth)
 
 
+@app.get("/")
+async def root():
+    """Service info — no auth required."""
+    return {
+        "name": "COGEXT",
+        "version": "1.9.0",
+        "status": "ok",
+        "description": "AI agent commitment-tracking infrastructure",
+        "docs": "/docs",
+        "health": "/health",
+    }
+
+
 @app.get("/health")
 async def health():
-    return {"status": "ok", "version": "1.8.0"}
+    return {"status": "ok", "version": "1.9.0"}
 
 
 @app.get("/db-check")
-async def db_check():
+async def db_check(_: Account = Depends(get_current_account)):
     sb = get_supabase()
     await sb.table("commitments").select("id").limit(1).execute()
     return {"db": "ok"}
 
 
 @app.get("/llm-check")
-async def llm_check():
+async def llm_check(_: Account = Depends(get_current_account)):
     try:
         result = extract_completion('Return JSON: {"hello": "world"}')
         return {"llm": "ok", "response": json.loads(result)}
@@ -93,7 +106,7 @@ _DEFAULT_TEST_MSG = (
 
 
 @app.get("/extract-test")
-async def extract_test(message: str = Query(default=_DEFAULT_TEST_MSG)):
+async def extract_test(message: str = Query(default=_DEFAULT_TEST_MSG), _: Account = Depends(get_current_account)):
     commitments = await extract_commitments(message)
     return {
         "count": len(commitments),

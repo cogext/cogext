@@ -1,4 +1,4 @@
-"""V1.5 – Atomic PostgreSQL state machine for commitment transitions.
+"""V1.9 – Atomic PostgreSQL state machine for commitment transitions.
 
 All state changes go through ``transition_commitment()``, which calls the
 ``cogext_transition_commitment`` Postgres function defined in
@@ -61,8 +61,29 @@ async def transition_commitment(
 
     Falls back to a Python-layer (non-atomic) transition when the DB function
     is not yet installed (e.g. unit-test environments without migrations).
+
+    V1.9 evidence gate: external_side_effect commitments cannot be marked
+    fulfilled without at least one evidence record with score > 0.7.
     """
     sb = get_supabase()
+
+    # Evidence gate — block fulfilled for external commitments lacking strong evidence
+    if target_status == "fulfilled":
+        c_resp = await sb.table("commitments").select("shape").eq(
+            "id", str(commitment_id)
+        ).maybe_single().execute()
+        if c_resp and c_resp.data and c_resp.data.get("shape") == "external_side_effect":
+            ev_resp = await sb.table("evidence").select("score").eq(
+                "commitment_id", str(commitment_id)
+            ).execute()
+            scores = [float(r.get("score") or 0) for r in (ev_resp.data or [])]
+            best_score = max(scores, default=0.0)
+            if best_score < 0.7:
+                raise ValueError(
+                    f"External commitment {commitment_id} requires evidence score >= 0.7 "
+                    f"before fulfillment (best score so far: {best_score:.2f}). "
+                    "Add evidence first via POST /commitments/{id}/evidence."
+                )
 
     # Try the DB-level atomic function first
     try:

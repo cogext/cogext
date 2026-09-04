@@ -1,4 +1,4 @@
-"""V1.8 – Ingest API: user_id auto-scoped from API key."""
+"""V1.9 – Ingest API: user_id auto-scoped from API key; timezone-aware deadlines."""
 import logging
 import uuid
 from datetime import datetime, timezone
@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from app.core.auth import Account, get_current_account
 from app.core.extractor import extract_commitments
 from app.core.scorer import route_by_confidence
+from app.core.temporal import resolve_deadline
 from app.db.connection import get_supabase
 from app.models.commitment import Commitment, IngestRequest, IngestResponse
 
@@ -23,7 +24,9 @@ async def ingest(body: IngestRequest, account: Account = Depends(get_current_acc
     user_id = uuid.UUID(account.account_id)
 
     trace_id = uuid.uuid4()
-    now = datetime.now(timezone.utc).isoformat()
+    now_dt = datetime.now(timezone.utc)
+    now = now_dt.isoformat()
+    actor_timezone = body.timezone or "UTC"
     try:
         await sb.table("episodic_log").insert({
             "id": str(uuid.uuid4()),
@@ -49,7 +52,27 @@ async def ingest(body: IngestRequest, account: Account = Depends(get_current_acc
         source_type=body.source_type,
         source_timestamp=body.source_timestamp,
         source_message_id=body.source_message_id,
+        actor_timezone=actor_timezone,
     )
+
+    # Resolve deadline expressions with actor timezone when LLM left deadline null
+    for c in commitments:
+        if (
+            c.deadline_expression
+            and c.due_condition
+            and c.due_condition.deadline is None
+            and c.due_condition.type == "time"
+        ):
+            try:
+                resolution = resolve_deadline(
+                    c.deadline_expression,
+                    c.source_timestamp or now_dt,
+                    actor_timezone,
+                )
+                if resolution.resolved_deadline:
+                    c.due_condition.deadline = resolution.resolved_deadline
+            except Exception as tr_err:
+                logger.warning("Temporal resolution failed cid=%s: %s", c.id, tr_err)
 
     saved: list[Commitment] = []
     for c in commitments:
@@ -82,6 +105,9 @@ async def ingest(body: IngestRequest, account: Account = Depends(get_current_acc
                 "verification_status": c.verification_status or "unverified",
                 "priority": c.priority or "medium",
                 "metadata": c.metadata or {},
+                "shape": c.shape,
+                "verifier_query": c.verifier_query,
+                "timezone": actor_timezone,
             }
             result = await sb.table("commitments").upsert(
                 row, on_conflict="idempotency_key", ignore_duplicates=True,

@@ -1,15 +1,20 @@
-"""V1.6 – Temporal intelligence: resolve natural-language deadline expressions.
+"""V1.9 – Temporal intelligence: timezone-aware deadline resolution.
 
 Strategy:
-  1. Deterministic parsing via dateutil / regex (no LLM cost, fully testable)
+  1. Deterministic parsing in actor's local timezone (no LLM cost, fully testable)
   2. LLM fallback for ambiguous expressions
   3. Always anchor to source_timestamp (NOT server time)
-  4. Always store in UTC
+  4. Always store resolved deadline in UTC
+
+Key V1.9 change: all date math (EOD, weekday, EOM) is performed in the actor's
+local timezone so that "by Friday EOD" resolves correctly for an actor in
+Asia/Kolkata rather than UTC.
 """
 import logging
 import re
 from datetime import datetime, timedelta, timezone
 from typing import Optional
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from app.models.temporal import ResolutionMethod, TemporalResolution
 
@@ -29,6 +34,16 @@ _UNITS = {
 }
 
 
+def _localise(anchor: datetime, timezone_str: str) -> tuple[datetime, object]:
+    """Return (local_anchor, local_tz). Falls back to UTC on unknown timezone."""
+    try:
+        tz = ZoneInfo(timezone_str)
+        return anchor.astimezone(tz), tz
+    except (ZoneInfoNotFoundError, Exception):
+        logger.warning("Unknown timezone %r — falling back to UTC", timezone_str)
+        return anchor.astimezone(timezone.utc), timezone.utc
+
+
 def resolve_deadline(
     raw_expression: str,
     anchor_timestamp: datetime,
@@ -36,11 +51,16 @@ def resolve_deadline(
 ) -> TemporalResolution:
     """Resolve *raw_expression* relative to *anchor_timestamp*.
 
-    Returns a :class:`TemporalResolution`.  ``resolved_deadline`` is UTC.
+    Date math is performed in the actor's local timezone (``timezone_str``) so
+    that "EOD Friday" resolves correctly for an actor in Asia/Kolkata, not UTC.
+    ``resolved_deadline`` is always returned in UTC.
     ``anchor_timestamp`` must be tz-aware; if naive it is treated as UTC.
     """
     if anchor_timestamp.tzinfo is None:
         anchor_timestamp = anchor_timestamp.replace(tzinfo=timezone.utc)
+
+    # Perform all date math in actor's local timezone
+    local_anchor, local_tz = _localise(anchor_timestamp, timezone_str)
 
     expr = raw_expression.strip().lower()
     resolved: Optional[datetime] = None
@@ -49,11 +69,11 @@ def resolve_deadline(
 
     # --- "today" / "tonight" ---
     if re.search(r'\btoday\b|\btonight\b', expr):
-        resolved = anchor_timestamp.replace(hour=23, minute=59, second=59, microsecond=0)
+        resolved = local_anchor.replace(hour=23, minute=59, second=59, microsecond=0)
 
     # --- "tomorrow" ---
     elif re.search(r'\btomorrow\b', expr):
-        d = anchor_timestamp + timedelta(days=1)
+        d = local_anchor + timedelta(days=1)
         resolved = d.replace(hour=23, minute=59, second=59, microsecond=0)
 
     # --- "by <weekday>" / "next <weekday>" (checked BEFORE standalone EOD) ---
@@ -63,14 +83,14 @@ def resolve_deadline(
         )
         if wd_match:
             target_wd = _WEEKDAYS[wd_match.group(1)]
-            current_wd = anchor_timestamp.weekday()
+            current_wd = local_anchor.weekday()
             days_ahead = (target_wd - current_wd) % 7 or 7
             # "next <weekday>" always means the occurrence ≥7 days from now
             if re.search(r'\bnext\b', expr):
                 days_ahead = (target_wd - current_wd) % 7
                 if days_ahead < 7:
                     days_ahead += 7
-            d = anchor_timestamp + timedelta(days=days_ahead)
+            d = local_anchor + timedelta(days=days_ahead)
             # check for EOD / 5pm qualifier
             if re.search(r'\b(end of day|eod|5\s*pm|17:00)\b', expr):
                 resolved = d.replace(hour=17, minute=0, second=0, microsecond=0)
@@ -79,21 +99,21 @@ def resolve_deadline(
 
         # --- "end of day" / "eod" (no weekday present) ---
         elif re.search(r'\bend of day\b|\beod\b', expr):
-            resolved = anchor_timestamp.replace(hour=23, minute=59, second=59, microsecond=0)
+            resolved = local_anchor.replace(hour=23, minute=59, second=59, microsecond=0)
 
         # --- "end of week" / "eow" ---
         elif re.search(r'\bend of week\b|\beow\b', expr):
-            days_ahead = 4 - anchor_timestamp.weekday()   # Friday
+            days_ahead = 4 - local_anchor.weekday()   # Friday
             if days_ahead < 0:
                 days_ahead += 7
-            d = anchor_timestamp + timedelta(days=days_ahead)
+            d = local_anchor + timedelta(days=days_ahead)
             resolved = d.replace(hour=23, minute=59, second=59, microsecond=0)
 
         # --- "end of month" / "eom" ---
         elif re.search(r'\bend of month\b|\beom\b', expr):
             import calendar
-            last_day = calendar.monthrange(anchor_timestamp.year, anchor_timestamp.month)[1]
-            resolved = anchor_timestamp.replace(
+            last_day = calendar.monthrange(local_anchor.year, local_anchor.month)[1]
+            resolved = local_anchor.replace(
                 day=last_day, hour=23, minute=59, second=59, microsecond=0
             )
 
@@ -105,7 +125,7 @@ def resolve_deadline(
             unit = in_match.group(2)
             delta = _UNITS.get(unit)
             if delta:
-                resolved = anchor_timestamp + (delta * n)
+                resolved = local_anchor + (delta * n)
 
     # --- "within N <unit>" ---
     if resolved is None:
@@ -115,7 +135,7 @@ def resolve_deadline(
             unit = within_match.group(2)
             delta = _UNITS.get(unit)
             if delta:
-                resolved = anchor_timestamp + (delta * n)
+                resolved = local_anchor + (delta * n)
 
     # --- ISO 8601 literal ---
     if resolved is None:
@@ -136,9 +156,9 @@ def resolve_deadline(
         ambiguity = f"Could not deterministically parse: {raw_expression!r}"
         resolved = _llm_resolve(raw_expression, anchor_timestamp)
 
-    # Ensure UTC
+    # Ensure UTC — local_anchor already carries local_tz so its tzinfo is set
     if resolved and resolved.tzinfo is None:
-        resolved = resolved.replace(tzinfo=timezone.utc)
+        resolved = resolved.replace(tzinfo=local_tz)
     if resolved:
         resolved = resolved.astimezone(timezone.utc)
 

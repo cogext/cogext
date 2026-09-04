@@ -40,6 +40,8 @@ ClassificationType = Literal[
     "suggestion", "hypothetical", "quoted_statement",
 ]
 
+CommitmentShape = Literal["external_side_effect", "logged_intent"]
+
 
 # ---------------------------------------------------------------------------
 # Sub-models
@@ -157,6 +159,10 @@ class Commitment(BaseModel):
     idempotency_key: str | None = None
     record_key: str | None = None
 
+    # V1.9 shape + verifier
+    shape: CommitmentShape | None = None
+    verifier_query: str | None = None
+
     # V1.7 classification
     classification: ClassificationType = "genuine_commitment"
 
@@ -175,6 +181,7 @@ class IngestRequest(BaseModel):
     source_timestamp: datetime | None = None
     source_message_id: str | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
+    timezone: str = "UTC"
 
 
 class IngestResponse(BaseModel):
@@ -192,3 +199,5 @@ class ExtractedCommitment(BaseModel):
     recipient: str | None = None
     conditions: list[str] = Field(default_factory=list)
     deadline_expression: str | None = None
+    shape: CommitmentShape | None = None
+    verifier_query: str | None = None

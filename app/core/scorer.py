@@ -1,13 +1,19 @@
-"""V1.5 – Route extracted commitments by confidence into initial statuses.
+"""V1.9 – Route extracted commitments by shape and confidence into initial statuses.
 
-High confidence (>= _OPEN_THRESHOLD) → 'open'
-Below threshold → 'pending_review'
+Routing rules:
+  external_side_effect → always 'pending_review' (requires human review before open)
+  logged_intent, confidence >= 0.92 → 'open'
+  logged_intent, confidence < 0.92  → 'pending_review'
+
+Verifiability:
+  verifier_query is None → verification_status = 'unverifiable'
+  verifier_query present → verification_status = 'unverified' (default)
 
 This module is a pure function with no DB side effects — all DB writes
 happen in the ingest API handler.
 """
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timezone as tz_module
 from typing import Literal
 
 from app.core.extractor import compute_idempotency_key
@@ -25,8 +31,9 @@ def route_by_confidence(
     source_type: str = "agent_message",
     source_timestamp: datetime | None = None,
     source_message_id: str | None = None,
+    actor_timezone: str = "UTC",
 ) -> list[Commitment]:
-    now = datetime.now(timezone.utc)
+    now = datetime.now(tz_module.utc)
     ts = source_timestamp or now
     results: list[Commitment] = []
 
@@ -35,9 +42,20 @@ def route_by_confidence(
         if item.classification != "genuine_commitment":
             continue
 
-        status: Literal["open", "pending_review"] = (
-            "open" if item.confidence >= _OPEN_THRESHOLD else "pending_review"
-        )
+        # Route by shape first, then confidence
+        shape = item.shape
+        if shape == "external_side_effect":
+            # External commitments always require human review before becoming open
+            status: Literal["open", "pending_review"] = "pending_review"
+        elif item.confidence >= _OPEN_THRESHOLD:
+            status = "open"
+        else:
+            status = "pending_review"
+
+        # Mark unverifiable upfront when the LLM could not produce a verifier query
+        verifier_query = item.verifier_query
+        verification_status = "unverifiable" if verifier_query is None else "unverified"
+
         idem_key = compute_idempotency_key(
             str(source_agent_id),
             item.promise_text,
@@ -63,6 +81,9 @@ def route_by_confidence(
                 status=status,
                 confidence=item.confidence,
                 classification=item.classification,
+                shape=shape,
+                verifier_query=verifier_query,
+                verification_status=verification_status,
                 idempotency_key=idem_key,
                 created_at=now,
                 updated_at=now,

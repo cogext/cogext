@@ -1,4 +1,4 @@
-"""V1.5 – Commitment extractor with classification.
+"""V1.9 – Commitment extractor with classification, shape, and verifier query.
 
 Classification types:
   genuine_commitment | intention | question | suggestion | hypothetical | quoted_statement
@@ -29,6 +29,11 @@ First, classify each statement:
 
 Only extract items with classification "genuine_commitment" AND confidence >= 0.5.
 
+## Commitment shape
+For each genuine_commitment, classify its shape:
+- "external_side_effect" — the action causes a real-world effect outside the agent that can be independently verified: sends an email, creates a file, schedules a meeting, deploys code, calls an API, posts a message, makes a payment, updates a record in an external system
+- "logged_intent" — an internal action with no independently verifiable external effect: notes a decision, records an analysis, updates agent state, acknowledges awareness of something
+
 ## Due condition types
 Classify each commitment's due_condition.type as exactly one of:
 - "time"           — has a specific deadline (e.g., "by Tuesday EOD")
@@ -36,11 +41,21 @@ Classify each commitment's due_condition.type as exactly one of:
 - "event_external" — triggered by an external event (e.g., "once legal signs off")
 - "state"          — triggered when a condition becomes true (e.g., "when the build passes")
 
+## Verifier query
+For each commitment, write a concise query describing what would independently confirm it happened:
+- Email sent: "check sent items for email to <recipient> with subject about <topic>"
+- Meeting booked: "check calendar for <event description> on <date>"
+- Code deployed: "check CI/CD logs or git log for <description>"
+- File created: "check filesystem/drive for file named <name>"
+- API call made: "check <system> logs for <request description>"
+- Return null ONLY if the commitment is purely internal and cannot be verified from outside the agent
+
 ## Output schema
 Return a JSON array. Each element must match this schema exactly:
 {
   "promise_text": "<the commitment, stated clearly in first-person present tense>",
   "classification": "<genuine_commitment|intention|question|suggestion|hypothetical|quoted_statement>",
+  "shape": "<external_side_effect|logged_intent>",
   "action": "<verb describing the action, or null>",
   "object": "<what is being acted upon, or null>",
   "recipient": "<who receives the action, or null>",
@@ -54,7 +69,8 @@ Return a JSON array. Each element must match this schema exactly:
     "match_threshold": 0.88,
     "partial_match_threshold": 0.65
   },
-  "confidence": <float 0.0-1.0>
+  "confidence": <float 0.0-1.0>,
+  "verifier_query": "<how to independently verify this happened, or null>"
 }
 
 ## Confidence guidelines
@@ -71,6 +87,7 @@ Output:
   {
     "promise_text": "I will send the deployment report to Sarah",
     "classification": "genuine_commitment",
+    "shape": "external_side_effect",
     "action": "send",
     "object": "deployment report",
     "recipient": "Sarah",
@@ -84,7 +101,8 @@ Output:
       "match_threshold": 0.88,
       "partial_match_threshold": 0.65
     },
-    "confidence": 0.95
+    "confidence": 0.95,
+    "verifier_query": "check sent items for email to Sarah with subject containing 'deployment report'"
   }
 ]
 
