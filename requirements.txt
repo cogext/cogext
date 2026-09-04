@@ -12,3 +12,4 @@ pytest-anyio>=0.0.0
 asgi-lifespan>=2.1.0
 email-validator
 openai>=1.0.0
+resend>=2.0.0
