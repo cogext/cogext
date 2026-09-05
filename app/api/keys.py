@@ -1,7 +1,9 @@
 """API key management — signup + rotation."""
 import logging
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
+from slowapi import _rate_limit_exceeded_handler
+from app.core.rate_limit import limiter
 from pydantic import BaseModel, EmailStr
 
 from app.core.auth import Account, generate_api_key, get_current_account
@@ -24,8 +26,9 @@ class KeyResponse(BaseModel):
     message: str
 
 
+@limiter.limit("5/minute")
 @router.post("/keys/signup", response_model=KeyResponse, tags=["auth"])
-async def signup(body: SignupRequest) -> KeyResponse:
+async def signup(request: Request, body: SignupRequest) -> KeyResponse:
     """Generate a new API key. One key per email (idempotent)."""
     sb = get_supabase()
 
