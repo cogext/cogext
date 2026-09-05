@@ -77,10 +77,7 @@ app.include_router(privacy_router,      prefix=_V1, tags=["privacy"],      **_au
 
 @app.get("/robots.txt", include_in_schema=False)
 async def robots():
-    return PlainTextResponse("User-agent: *
-Allow: /
-Sitemap: https://cogextai.com/sitemap.xml
-")
+    return PlainTextResponse("User-agent: *\nAllow: /\nSitemap: https://cogextai.com/sitemap.xml\n")
 
 
 @app.get("/sitemap.xml", include_in_schema=False)
