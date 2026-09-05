@@ -4,6 +4,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import PlainTextResponse
 
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
@@ -72,6 +73,25 @@ app.include_router(webhooks_router,     prefix=_V1, tags=["webhooks"],     **_au
 app.include_router(calibration_router,  prefix=_V1, tags=["calibration"],  **_auth)
 app.include_router(refinements_router,  prefix=_V1, tags=["refinements"],  **_auth)
 app.include_router(privacy_router,      prefix=_V1, tags=["privacy"],      **_auth)
+
+
+@app.get("/robots.txt", include_in_schema=False)
+async def robots():
+    return PlainTextResponse("User-agent: *
+Allow: /
+Sitemap: https://cogextai.com/sitemap.xml
+")
+
+
+@app.get("/sitemap.xml", include_in_schema=False)
+async def sitemap():
+    return PlainTextResponse(
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        '<sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">'
+        '<sitemap><loc>https://cogextai.com/sitemap.xml</loc></sitemap>'
+        '</sitemapindex>',
+        media_type="application/xml",
+    )
 
 
 @app.get("/")
