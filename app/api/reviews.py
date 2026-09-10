@@ -10,6 +10,7 @@ from fastapi import APIRouter, HTTPException, Query
 
 from app.core.state_machine import transition_commitment
 from app.db.connection import get_supabase
+from app.core.notifications import send_kill_switch_alert, verify_action_token
 from app.models.review import (
     AcceptReviewRequest,
     AssignReviewRequest,
@@ -85,6 +86,24 @@ async def create_review(body: CreateReviewRequest) -> HumanReview:
 
     await _insert_event(sb, str(body.commitment_id), "review_created", "review_api",
                         {"review_id": str(rev_id), "reason_code": body.reason_code})
+
+    # ── Kill Switch: Slack alert ──────────────────────────────────────
+    try:
+        c_row = c_resp.data[0]
+        risk_score = c_row.get("risk_score")
+        risk_reasons = c_row.get("risk_reasons") or []
+        await send_kill_switch_alert(
+            review_id=str(rev_id),
+            commitment_id=str(body.commitment_id),
+            promise_text=c_row.get("promise_text", ""),
+            risk_score=risk_score,
+            risk_reasons=risk_reasons,
+            status=c_row.get("status", "open"),
+            agent_id=c_row.get("source_agent_id", ""),
+        )
+    except Exception as ks_err:
+        logger.warning("Kill switch alert failed: %s", ks_err)
+    # ─────────────────────────────────────────────────────────────────
 
     resp = await sb.table("human_reviews").select("*").eq("id", str(rev_id)).execute()
     return HumanReview.model_validate(resp.data[0])
@@ -193,3 +212,73 @@ async def edit_review(review_id: uuid.UUID, body: EditReviewRequest) -> HumanRev
     }).eq("id", str(review_id)).execute()
     updated = await _get_review(sb, str(review_id))
     return HumanReview.model_validate(updated)
+
+
+# ── Public: one-click action from Slack button ───────────────────────────────
+
+from fastapi.responses import HTMLResponse
+
+@router.get("/reviews/{review_id}/action", include_in_schema=False)
+async def review_action(
+    review_id: uuid.UUID,
+    action: str,
+    token: str,
+) -> HTMLResponse:
+    """Public endpoint called by Slack action buttons — no API key required.
+    Verifies HMAC token, executes approve or cancel, returns simple HTML.
+    """
+    if action not in ("approve", "cancel"):
+        return HTMLResponse("<h2>Invalid action.</h2>", status_code=400)
+
+    if not verify_action_token(token, str(review_id), action):
+        return HTMLResponse("<h2>Token invalid or expired.</h2>", status_code=403)
+
+    sb = get_supabase()
+    try:
+        row = await _get_review(sb, str(review_id))
+    except HTTPException:
+        return HTMLResponse("<h2>Review not found.</h2>", status_code=404)
+
+    now = datetime.now(timezone.utc).isoformat()
+
+    if action == "approve":
+        if row["status"] not in ("pending", "assigned"):
+            return HTMLResponse(f"<h2>Review already {row['status']}.</h2>")
+        await sb.table("human_reviews").update({
+            "status": "accepted",
+            "resolved_at": now,
+            "resolution": "Approved via Slack kill-switch",
+        }).eq("id", str(review_id)).execute()
+        try:
+            from app.core.state_machine import transition_commitment
+            await transition_commitment(
+                uuid.UUID(row["commitment_id"]), "open",
+                actor="slack_kill_switch",
+                data={"review_id": str(review_id), "action": "approved"},
+            )
+        except Exception as e:
+            logger.warning("Kill switch approve transition failed: %s", e)
+        await _insert_event(sb, row["commitment_id"], "review_accepted", "slack_kill_switch",
+                            {"review_id": str(review_id)})
+        return HTMLResponse("<h2>✅ Commitment approved.</h2><p>You can close this tab.</p>")
+
+    else:  # cancel
+        if row["status"] not in ("pending", "assigned"):
+            return HTMLResponse(f"<h2>Review already {row['status']}.</h2>")
+        await sb.table("human_reviews").update({
+            "status": "rejected",
+            "resolved_at": now,
+            "resolution": "Cancelled via Slack kill-switch",
+        }).eq("id", str(review_id)).execute()
+        try:
+            from app.core.state_machine import transition_commitment
+            await transition_commitment(
+                uuid.UUID(row["commitment_id"]), "cancelled",
+                actor="slack_kill_switch",
+                data={"review_id": str(review_id), "action": "cancelled"},
+            )
+        except Exception as e:
+            logger.warning("Kill switch cancel transition failed: %s", e)
+        await _insert_event(sb, row["commitment_id"], "review_rejected", "slack_kill_switch",
+                            {"review_id": str(review_id)})
+        return HTMLResponse("<h2>🛑 Commitment cancelled.</h2><p>You can close this tab.</p>")

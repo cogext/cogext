@@ -11,6 +11,9 @@ from app.core.scorer import route_by_confidence
 from app.core.temporal import resolve_deadline
 from app.db.connection import get_supabase
 from app.models.commitment import Commitment, IngestRequest, IngestResponse
+from app.core.contradiction_detector import detect_contradictions
+from app.core.risk_scorer import score_risk, is_high_risk
+from app.api.webhooks import deliver_event
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -144,6 +147,56 @@ async def ingest(body: IngestRequest, account: Account = Depends(get_current_acc
                     }).execute()
                 except Exception as ev_err:
                     logger.warning("Event insert failed cid=%s: %s", commitment_to_save.id, ev_err)
+
+                # ── Contradiction Radar ───────────────────────────────────
+                try:
+                    contradictions = await detect_contradictions(
+                        commitment_to_save, str(user_id)
+                    )
+                    for contra in contradictions:
+                        await deliver_event(
+                            str(uuid.uuid4()),
+                            "contradiction.detected",
+                            {
+                                "old_commitment_id": contra["old_id"],
+                                "new_commitment_id": contra["new_id"],
+                                "reason": contra["reason"],
+                                "old_promise": contra["old_promise"],
+                                "new_promise": contra["new_promise"],
+                                "user_id": str(user_id),
+                                "agent_id": str(body.source_agent_id),
+                            },
+                        )
+                except Exception as cd_err:
+                    logger.warning("Contradiction detection failed cid=%s: %s", commitment_to_save.id, cd_err)
+                # ─────────────────────────────────────────────────────────
+
+                # ── Failure Predictor ─────────────────────────────────────
+                try:
+                    risk, reasons = await score_risk(commitment_to_save, str(user_id))
+                    if risk > 0:
+                        await sb.table("commitments").update({
+                            "risk_score": risk,
+                            "risk_reasons": reasons,
+                        }).eq("id", str(commitment_to_save.id)).execute()
+                        commitment_to_save.risk_score = risk
+                        commitment_to_save.risk_reasons = reasons
+                    if is_high_risk(risk):
+                        await deliver_event(
+                            str(uuid.uuid4()),
+                            "risk.high",
+                            {
+                                "commitment_id": str(commitment_to_save.id),
+                                "promise_text": commitment_to_save.promise_text,
+                                "risk_score": risk,
+                                "risk_reasons": reasons,
+                                "user_id": str(user_id),
+                                "agent_id": str(body.source_agent_id),
+                            },
+                        )
+                except Exception as rs_err:
+                    logger.warning("Risk scoring failed cid=%s: %s", commitment_to_save.id, rs_err)
+                # ─────────────────────────────────────────────────────────
 
         except Exception as e:
             logger.error("commitment insert failed id=%s: %s", c.id, e)

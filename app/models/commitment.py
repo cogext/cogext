@@ -163,6 +163,13 @@ class Commitment(BaseModel):
     shape: CommitmentShape | None = None
     verifier_query: str | None = None
 
+    # V2.0 risk scoring
+    risk_score: float | None = None
+    risk_reasons: list[str] | None = None
+
+    # V2.0 audit receipt
+    receipt_token: str | None = None
+
     # V1.7 classification
     classification: ClassificationType = "genuine_commitment"
 

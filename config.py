@@ -14,6 +14,8 @@ class Settings(BaseSettings):
     SUPABASE_ANON_KEY: str = ""
     SUPABASE_SERVICE_ROLE_KEY: str = ""
     APP_ENV: str = "development"
+    SLACK_WEBHOOK_URL: str = ""
+    ACTION_TOKEN_SECRET: str = ""
 
 
 settings = Settings()

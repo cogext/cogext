@@ -24,6 +24,8 @@ from app.api.reviews import router as reviews_router
 from app.api.status import router as status_router
 from app.api.webhooks import router as webhooks_router
 from app.api.paypal_webhook import router as paypal_webhook_router
+from app.api.audit import router as audit_router
+from app.api.verify import router as verify_router
 from app.core.auth import Account, get_current_account
 from app.core.extractor import extract_commitments
 from app.core.lifecycle import router as lifecycle_router
@@ -56,6 +58,7 @@ _V1 = "/api/v1"
 # ── Public routes (no auth) ───────────────────────────────────────────────────
 app.include_router(keys_router, prefix=_V1)  # /api/v1/keys/signup is public
 app.include_router(paypal_webhook_router, prefix=_V1, tags=["billing"])  # public — PayPal webhook
+app.include_router(audit_router, prefix=_V1, tags=["audit"])  # GET /audit/{token} is public; POST /commitments/{id}/receipt needs auth below too
 
 # ── Protected routes (require API key) ────────────────────────────────────────
 _auth = {"dependencies": [Depends(get_current_account)]}
@@ -73,6 +76,7 @@ app.include_router(webhooks_router,     prefix=_V1, tags=["webhooks"],     **_au
 app.include_router(calibration_router,  prefix=_V1, tags=["calibration"],  **_auth)
 app.include_router(refinements_router,  prefix=_V1, tags=["refinements"],  **_auth)
 app.include_router(privacy_router,      prefix=_V1, tags=["privacy"],      **_auth)
+app.include_router(verify_router,       prefix=_V1, tags=["verify"],       **_auth)
 
 
 @app.get("/robots.txt", include_in_schema=False)
