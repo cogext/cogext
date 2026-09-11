@@ -133,8 +133,7 @@ async def score_risk(commitment: Commitment, user_id: str) -> tuple[float, list[
     domain_hits: list[str] = []
     for kw, weight in _DOMAIN_RISK.items():
         if kw in text_lower:
-            if weight > domain_boost:
-                domain_boost = weight
+            domain_boost = min(domain_boost + weight, 0.35)
             domain_hits.append(kw)
     if domain_hits:
         score += domain_boost

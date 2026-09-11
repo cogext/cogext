@@ -170,6 +170,9 @@ class Commitment(BaseModel):
     # V2.0 audit receipt
     receipt_token: str | None = None
 
+    # V2.0 contradiction radar — populated in ingest response when a contradiction is detected
+    contradiction_alert: dict | None = None
+
     # V1.7 classification
     classification: ClassificationType = "genuine_commitment"
 

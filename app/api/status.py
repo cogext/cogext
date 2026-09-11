@@ -75,3 +75,65 @@ async def get_commitment(commitment_id: uuid.UUID) -> Commitment:
     except Exception as e:
         logger.error("Failed to parse commitment: %s", e)
         raise HTTPException(status_code=500, detail="Failed to parse commitment")
+
+
+class ApproveRequest(BaseModel):
+    actor: str = "api"
+    decision: str = "approved"
+    resolution: str | None = None
+
+
+@router.post("/commitments/{commitment_id}/approve")
+async def approve_commitment(commitment_id: uuid.UUID, body: ApproveRequest) -> dict:
+    """Approve a commitment that is pending_review — transitions it to open.
+    Finds the most recent pending/assigned review for the commitment and accepts it.
+    Returns JSON with the commitment id and new state.
+    """
+    sb = get_supabase()
+
+    # Verify commitment exists and is in pending_review
+    c_resp = await sb.table("commitments").select("id, status").eq(
+        "id", str(commitment_id)
+    ).execute()
+    if not c_resp.data:
+        raise HTTPException(status_code=404, detail="Commitment not found")
+
+    current_status = c_resp.data[0]["status"]
+    if current_status not in ("pending_review", "PENDING_REVIEW"):
+        raise HTTPException(
+            status_code=409,
+            detail=f"Commitment is not pending_review (current: {current_status})",
+        )
+
+    # Find the open review
+    rev_resp = await sb.table("human_reviews") \
+        .select("id, status") \
+        .eq("commitment_id", str(commitment_id)) \
+        .in_("status", ["pending", "assigned"]) \
+        .order("created_at", desc=True) \
+        .limit(1) \
+        .execute()
+
+    import datetime as _dt
+    now = _dt.datetime.now(_dt.timezone.utc).isoformat()
+
+    if rev_resp.data:
+        review_id = rev_resp.data[0]["id"]
+        await sb.table("human_reviews").update({
+            "status": "accepted",
+            "resolved_at": now,
+            "resolution": body.resolution or f"Approved by {body.actor}",
+        }).eq("id", review_id).execute()
+
+    # Transition commitment from pending_review → open
+    try:
+        await transition_commitment(
+            commitment_id, "open",
+            actor=body.actor,
+            data={"decision": body.decision},
+        )
+    except Exception as e:
+        logger.error("approve_commitment: state transition failed: %s", e)
+        raise HTTPException(status_code=409, detail=f"State transition failed: {e}")
+
+    return {"id": str(commitment_id), "state": "open", "status": "open"}

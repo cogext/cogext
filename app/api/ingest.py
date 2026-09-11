@@ -153,6 +153,9 @@ async def ingest(body: IngestRequest, account: Account = Depends(get_current_acc
                     contradictions = await detect_contradictions(
                         commitment_to_save, str(user_id)
                     )
+                    if contradictions:
+                        # Attach first contradiction to the response so callers can inspect it
+                        commitment_to_save.contradiction_alert = contradictions[0]
                     for contra in contradictions:
                         await deliver_event(
                             str(uuid.uuid4()),
