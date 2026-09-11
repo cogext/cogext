@@ -4,14 +4,18 @@ Scores a newly-ingested commitment's likelihood of failure on a 0-1 scale.
 No LLM call: pure heuristics over fields we already have, so it's fast and cheap.
 
 Risk factors:
-  - High-confidence external_side_effect with a tight deadline  → higher risk
-  - Vague promise_text (short, no action/object/recipient)     → higher risk
-  - Agent historically fails on similar commitments            → higher risk (DB)
-  - Unconditional deadline (absolute, <48h away)              → higher risk
+  1  external_side_effect shape (harder to fulfil, requires verifiable action)
+  2  Vague promise (missing structural fields or very short)
+  3  Tight or past deadline
+  4  Agent historical failure rate
+  5  Many external conditions
+  6  High-stakes domain keywords (legal, financial, medical, compliance)
+  7  Deadline language present but no parsed deadline (deadline expression without UTC anchor)
 """
 from __future__ import annotations
 
 import logging
+import re
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -22,21 +26,47 @@ logger = logging.getLogger(__name__)
 
 _HIGH_RISK_THRESHOLD = 0.70
 
+# Domain keywords that materially raise failure risk.
+# Value = risk contribution (capped at the highest matching keyword).
+_DOMAIN_RISK: dict[str, float] = {
+    # Legal / compliance
+    "legal": 0.20, "contract": 0.15, "lawsuit": 0.25,
+    "compliance": 0.20, "regulatory": 0.20, "gdpr": 0.25, "hipaa": 0.25,
+    "court": 0.25, "filing": 0.15, "nda": 0.20,
+    # Financial
+    "transfer": 0.20, "payment": 0.15, "invoice": 0.15,
+    "financial": 0.20, "money": 0.15, "funds": 0.15,
+    "wire": 0.20, "bank": 0.15, "salary": 0.15,
+    # Medical / safety
+    "surgery": 0.25, "patient": 0.15, "medical": 0.20, "prescription": 0.20,
+    # Critical infra
+    "deploy": 0.15, "production": 0.15, "database": 0.15, "migration": 0.15,
+}
+
+# Patterns that suggest a deadline expression exists even if the parser didn't resolve it
+_DEADLINE_LANG = re.compile(
+    r"\b(today|tonight|tomorrow|monday|tuesday|wednesday|thursday|friday|saturday|sunday"
+    r"|eod|eow|eom|end of day|end of week|end of month"
+    r"|by \d|before \d|at \d|noon|midnight|am\b|pm\b"
+    r"|\d+ hours?|\d+ days?)\b",
+    re.IGNORECASE,
+)
+
 
 async def score_risk(commitment: Commitment, user_id: str) -> tuple[float, list[str]]:
     """Return (risk_score 0-1, reasons list).
 
-    risk_score ≥ 0.70 → considered high risk, caller fires `risk.high` webhook.
+    risk_score >= 0.70 → high risk; caller fires risk.high webhook.
     """
     score = 0.0
     reasons: list[str] = []
 
-    # ── Factor 1: shape = external_side_effect (harder to fulfil) ──────────
+    # Factor 1: external_side_effect (harder to fulfil)
     if commitment.shape == "external_side_effect":
         score += 0.20
         reasons.append("external_side_effect shape requires verifiable action")
 
-    # ── Factor 2: vague promise (short text, missing structural fields) ──────
+    # Factor 2: vague promise
     missing_fields = sum([
         not commitment.action,
         not commitment.object,
@@ -49,7 +79,7 @@ async def score_risk(commitment: Commitment, user_id: str) -> tuple[float, list[
         score += 0.10
         reasons.append("promise_text is very short — may be ambiguous")
 
-    # ── Factor 3: tight absolute deadline ────────────────────────────────────
+    # Factor 3: tight or past deadline (requires parsed UTC deadline)
     if commitment.due_condition and commitment.due_condition.deadline:
         now = datetime.now(timezone.utc)
         dl = commitment.due_condition.deadline
@@ -66,7 +96,7 @@ async def score_risk(commitment: Commitment, user_id: str) -> tuple[float, list[
             score += 0.10
             reasons.append(f"deadline is within 72h ({hours_until:.1f}h away)")
 
-    # ── Factor 4: agent historical failure rate ───────────────────────────────
+    # Factor 4: agent historical failure rate
     try:
         sb = get_supabase()
         hist = await (
@@ -92,10 +122,30 @@ async def score_risk(commitment: Commitment, user_id: str) -> tuple[float, list[
     except Exception as e:
         logger.warning("risk scorer history query failed: %s", e)
 
-    # ── Factor 5: conditions make fulfilment conditional ─────────────────────
+    # Factor 5: many external conditions
     if commitment.conditions and len(commitment.conditions) >= 2:
         score += 0.10
         reasons.append(f"fulfilment depends on {len(commitment.conditions)} external conditions")
+
+    # Factor 6: high-stakes domain keywords
+    text_lower = commitment.promise_text.lower()
+    domain_boost = 0.0
+    domain_hits: list[str] = []
+    for kw, weight in _DOMAIN_RISK.items():
+        if kw in text_lower:
+            if weight > domain_boost:
+                domain_boost = weight
+            domain_hits.append(kw)
+    if domain_hits:
+        score += domain_boost
+        reasons.append(f"high-stakes domain detected: {', '.join(sorted(set(domain_hits)))}")
+
+    # Factor 7: deadline language present but parser produced no parsed deadline
+    # (e.g. "by 5pm Friday" when temporal parser couldn't anchor it)
+    if not (commitment.due_condition and commitment.due_condition.deadline):
+        if _DEADLINE_LANG.search(commitment.promise_text):
+            score += 0.10
+            reasons.append("deadline language present but could not be parsed — manual check advised")
 
     score = min(score, 1.0)
     return round(score, 3), reasons

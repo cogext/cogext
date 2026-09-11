@@ -14,6 +14,20 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
+def _map_strength(score: float) -> str:
+    """Map score to a DB-valid strength value.
+
+    DB CHECK: ('strong','supporting','weak','contradictory')
+    Never return 'none' — that violates the constraint and silently fails the INSERT.
+    A zero-score piece of evidence is still 'weak' (submitted but unmatched).
+    """
+    if score >= 0.8:
+        return "strong"
+    if score >= 0.5:
+        return "supporting"
+    return "weak"  # covers 0.0 — still stored, just unmatched
+
+
 @router.post("/commitments/{commitment_id}/evidence", response_model=Evidence)
 async def submit_evidence(
     commitment_id: uuid.UUID,
@@ -41,15 +55,7 @@ async def submit_evidence(
         commitment_deadline=commitment_deadline,
     )
 
-    # Determine strength from score
-    if score >= 0.8:
-        strength = "strong"
-    elif score >= 0.5:
-        strength = "supporting"
-    elif score > 0.0:
-        strength = "weak"
-    else:
-        strength = "none"
+    strength = _map_strength(score)
 
     # Idempotency key for external evidence
     idem_key = None
@@ -82,11 +88,18 @@ async def submit_evidence(
 
     try:
         if idem_key:
-            await sb.table("evidence").upsert(
+            result = await sb.table("evidence").upsert(
                 row, on_conflict="idempotency_key", ignore_duplicates=True
             ).execute()
         else:
-            await sb.table("evidence").insert(row).execute()
+            result = await sb.table("evidence").insert(row).execute()
+
+        # Supabase client may not raise on PostgREST errors — check explicitly
+        if hasattr(result, "data") and result.data is None:
+            logger.error("Evidence insert returned no data — possible constraint violation. row=%s", row)
+            raise HTTPException(status_code=500, detail="Failed to save evidence — DB constraint")
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error("Evidence insert failed: %s", e)
         raise HTTPException(status_code=500, detail="Failed to save evidence")
