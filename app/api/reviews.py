@@ -52,7 +52,7 @@ async def create_review(body: CreateReviewRequest) -> HumanReview:
     sb = get_supabase()
 
     # Verify commitment exists
-    c_resp = await sb.table("commitments").select("id, status").eq(
+    c_resp = await sb.table("commitments").select("id, status, promise_text, risk_score, risk_reasons, source_agent_id").eq(
         "id", str(body.commitment_id)
     ).execute()
     if not c_resp.data:
