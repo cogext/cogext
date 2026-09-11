@@ -141,7 +141,8 @@ pinger/         # Cloudflare Worker — keeps Render awake
 |---|---|---|
 | v1.0–v1.9 | ✅ Done | Ingest, extract, store, SDK, state machine, multi-tenant auth |
 | v2.0 | ✅ Live | Contradiction Radar, Failure Predictor, Audit Receipt, Verifier Engine, Kill Switch |
-| v3.0 | Planned | Dashboard UI, SLA monitors, multi-agent orchestration trust layer |
+| v2.4 | ✅ Live | Developer Portal (API key management, usage stats, commitment dashboard) |
+| v3.0 | Planned | SLA monitors, multi-agent orchestration trust layer |
 
 ---
 
