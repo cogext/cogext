@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from app.db.connection import get_supabase
+from app.core.state_machine import transition_commitment
 from app.models.commitment import Commitment
 
 logger = logging.getLogger(__name__)
@@ -70,22 +71,20 @@ async def detect_contradictions(
             reason,
         )
 
-        # Transition older commitment → contradicted via DB RPC
+        # Transition older commitment → contradicted via state machine
         try:
-            await sb.rpc(
-                "cogext_transition_commitment",
-                {
-                    "p_commitment_id": old_id,
-                    "p_target_status": "contradicted",
-                    "p_actor": "contradiction_detector",
-                    "p_data": {
-                        "superseded_by": str(new_commitment.id),
-                        "reason": reason,
-                        "new_promise": new_commitment.promise_text,
-                    },
-                    "p_idempotency_key": f"contradicted:{old_id}:{str(new_commitment.id)}",
+            import uuid as _uuid
+            await transition_commitment(
+                _uuid.UUID(old_id),
+                "contradicted",
+                actor="contradiction_detector",
+                data={
+                    "superseded_by": str(new_commitment.id),
+                    "reason": reason,
+                    "new_promise": new_commitment.promise_text,
                 },
-            ).execute()
+                idempotency_key=f"contradicted:{old_id}:{str(new_commitment.id)}",
+            )
         except Exception as e:
             logger.warning("contradiction transition failed old=%s: %s", old_id, e)
 

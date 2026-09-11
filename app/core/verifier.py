@@ -19,6 +19,7 @@ from uuid import UUID
 
 from app.core.evidence_adapters.base import NormalisedEvidence
 from app.core.evidence_adapters.gmail import GmailAdapter
+import uuid as _uuid
 from app.core.state_machine import transition_commitment
 from app.db.connection import get_supabase
 from app.models.commitment import Commitment
@@ -86,8 +87,8 @@ async def run_verification(
     if new_status:
         try:
             await transition_commitment(
-                commitment_id=str(commitment.id),
-                target_status=new_status,
+                _uuid.UUID(str(commitment.id)),
+                new_status,
                 actor=actor,
                 data={"evidence_id": evidence.external_event_id, "score": score, "reason": reason},
             )
