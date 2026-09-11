@@ -45,7 +45,7 @@ async def detect_contradictions(
     try:
         resp = await (
             sb.table("commitments")
-            .select("id,action,object,recipient,deadline,due_condition,promise_text,status,created_at")
+            .select("id,action,object,recipient,deadline,deadline_expression,due_condition,promise_text,status,created_at")
             .eq("user_id", user_id)
             .eq("source_agent_id", str(new_commitment.source_agent_id))
             .in_("status", list(_LIVE_STATUSES))
@@ -157,5 +157,24 @@ def _contradiction_reason(new: Commitment, old: dict[str, Any]) -> str | None:
                     )
             except Exception:
                 pass
+        else:
+            # Parsed UTC datetimes unavailable — compare raw deadline expressions
+            old_expr = (old.get("deadline_expression") or "").strip().lower()
+            new_expr = (new.deadline_expression or "").strip().lower()
+            if old_expr and new_expr and old_expr != new_expr:
+                return (
+                    f"Conflicting deadlines for '{new.object}' to '{new.recipient}': "
+                    f"previously '{old.get('deadline_expression')}', now '{new.deadline_expression}'"
+                )
+
+    # Case 3b: full semantic match (action + object + recipient) with different deadline text
+    if action_match and recipient_match and new_object and old_object and new_object == old_object:
+        old_expr = (old.get("deadline_expression") or "").strip().lower()
+        new_expr = (new.deadline_expression or "").strip().lower()
+        if old_expr and new_expr and old_expr != new_expr:
+            return (
+                f"Same commitment to '{new.recipient}' but deadline changed: "
+                f"'{old.get('deadline_expression')}' → '{new.deadline_expression}'"
+            )
 
     return None
