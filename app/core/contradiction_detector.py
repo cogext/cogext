@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 
 # Statuses that are still "live" — candidates for contradiction
 # Only statuses that can legally transition to contradicted (per state_machine.py)
-_LIVE_STATUSES = ("open", "due", "overdue", "blocked")
+_LIVE_STATUSES = ("open", "due", "overdue", "blocked", "pending_review", "detected")
 
 
 async def detect_contradictions(
