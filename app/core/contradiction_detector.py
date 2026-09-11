@@ -20,7 +20,8 @@ from app.models.commitment import Commitment
 logger = logging.getLogger(__name__)
 
 # Statuses that are still "live" — candidates for contradiction
-_LIVE_STATUSES = ("open", "due", "overdue", "detected", "pending_review", "blocked")
+# Only statuses that can legally transition to contradicted (per state_machine.py)
+_LIVE_STATUSES = ("open", "due", "overdue", "blocked")
 
 
 async def detect_contradictions(
