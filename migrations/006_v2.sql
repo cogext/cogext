@@ -12,6 +12,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_commitments_receipt_token
     WHERE receipt_token IS NOT NULL;
 
 -- Index to support Failure Predictor queries by agent + deadline
+-- deadline lives inside the due_condition JSONB column
 CREATE INDEX IF NOT EXISTS idx_commitments_agent_deadline
-    ON commitments (source_agent_id, deadline)
-    WHERE deadline IS NOT NULL;
+    ON commitments (source_agent_id, (due_condition->>'deadline'))
+    WHERE due_condition->>'deadline' IS NOT NULL;
