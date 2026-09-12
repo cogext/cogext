@@ -125,6 +125,17 @@ def _contradiction_reason(new: Commitment, old: dict[str, Any]) -> str | None:
     action_match = new_action and old_action and new_action == old_action
     recipient_match = new_recipient and old_recipient and new_recipient == old_recipient
 
+    # Case 0: same action + same recipient, different deadline — catches relative date changes
+    # ("on Friday" → "on Monday") even when object text varies slightly between LLM calls
+    if action_match and recipient_match:
+        old_expr = (old.get("deadline_expression") or "").strip().lower()
+        new_expr = (new.deadline_expression or "").strip().lower()
+        if old_expr and new_expr and old_expr != new_expr:
+            return (
+                f"Same action '{new.action}' to '{new.recipient}' but deadline changed: "
+                f"'{old.get('deadline_expression')}' → '{new.deadline_expression}'"
+            )
+
     # Case 1: same action + same recipient, different object
     if action_match and recipient_match and new_object and old_object and new_object != old_object:
         return (
