@@ -60,7 +60,15 @@ async def detect_contradictions(
     contradictions: list[dict[str, Any]] = []
 
     for old in candidates:
-        reason = _contradiction_reason(new_commitment, old)
+        old_promise = (old.get('promise_text') or '').strip().lower()
+        new_promise = (new_commitment.promise_text or '').strip().lower()
+        if old_promise and new_promise and old_promise == new_promise:
+            reason = (
+                f"Same commitment '{new_commitment.promise_text}' sent as two distinct messages "
+                f"— deadline revised"
+            )
+        else:
+            reason = _contradiction_reason(new_commitment, old)
         if not reason:
             continue
 
