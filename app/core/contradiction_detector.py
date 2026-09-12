@@ -188,4 +188,14 @@ def _contradiction_reason(new: Commitment, old: dict[str, Any]) -> str | None:
                 f"'{old.get('deadline_expression')}' → '{new.deadline_expression}'"
             )
 
+    # Case SAME: identical action + recipient + object across two distinct DB rows.
+    # Raw-message idempotency ensures two *different* raw messages produce two rows;
+    # if those rows share action+recipient+object, the agent sent the same commitment
+    # twice with a different deadline (e.g. "on Friday" → "on Monday").
+    if action_match and recipient_match and new_object and old_object and new_object == old_object:
+        return (
+            f"Duplicate commitment: '{new.action}' '{new.object}' to '{new.recipient}' "
+            f"sent as two distinct messages — possible deadline revision"
+        )
+
     return None

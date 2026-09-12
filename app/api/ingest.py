@@ -1,4 +1,5 @@
 """V1.9 – Ingest API: user_id auto-scoped from API key; timezone-aware deadlines."""
+import hashlib
 import logging
 import uuid
 from datetime import datetime, timezone
@@ -76,6 +77,19 @@ async def ingest(body: IngestRequest, account: Account = Depends(get_current_acc
                     c.due_condition.deadline = resolution.resolved_deadline
             except Exception as tr_err:
                 logger.warning("Temporal resolution failed cid=%s: %s", c.id, tr_err)
+
+    # Override idempotency keys to include raw message text so that semantically
+    # distinct messages (same intent, different deadline) always create separate rows,
+    # regardless of whether the LLM extracted deadline_expression or not.
+    _hour = now_dt.replace(minute=0, second=0, microsecond=0, tzinfo=timezone.utc)
+    for c in commitments:
+        _payload = (
+            f"{body.source_agent_id}"
+            f"|{body.message.strip().lower()}"
+            f"|{c.promise_text.strip().lower()}"
+            f"|{_hour.isoformat()}"
+        )
+        c.idempotency_key = hashlib.sha256(_payload.encode()).hexdigest()
 
     saved: list[Commitment] = []
     for c in commitments:
