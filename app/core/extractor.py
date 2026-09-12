@@ -181,8 +181,12 @@ def compute_idempotency_key(
     source_agent_id: str,
     promise_text: str,
     created_at_window: datetime,
+    deadline_expression: str | None = None,
 ) -> str:
     # Truncate to the hour so re-ingests within the same hour deduplicate
     window = created_at_window.replace(minute=0, second=0, microsecond=0, tzinfo=timezone.utc)
-    payload = f"{source_agent_id}|{promise_text.strip().lower()}|{window.isoformat()}"
+    # Include deadline_expression so commitments with the same action/object but
+    # different deadlines create distinct rows (e.g. "on Friday" vs "on Monday")
+    deadline_part = (deadline_expression or "").strip().lower()
+    payload = f"{source_agent_id}|{promise_text.strip().lower()}|{deadline_part}|{window.isoformat()}"
     return hashlib.sha256(payload.encode()).hexdigest()

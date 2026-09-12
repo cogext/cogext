@@ -60,6 +60,7 @@ def route_by_confidence(
             str(source_agent_id),
             item.promise_text,
             now,
+            deadline_expression=item.deadline_expression,
         )
         results.append(
             Commitment(
