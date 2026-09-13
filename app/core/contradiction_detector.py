@@ -31,6 +31,16 @@ _DEADLINE_WORDS = re.compile(
 )
 
 
+def _jaccard(a: str, b: str) -> float:
+    ta = set(a.split())
+    tb = set(b.split())
+    if not ta and not tb:
+        return 1.0
+    if not ta or not tb:
+        return 0.0
+    return len(ta & tb) / len(ta | tb)
+
+
 async def detect_contradictions(
     new_commitment: Commitment,
     user_id: str,
@@ -42,7 +52,7 @@ async def detect_contradictions(
     Side-effects:
       - Transitions conflicting commitments to `contradicted` via RPC.
     """
-    if not new_commitment.action and not new_commitment.recipient:
+    if not (new_commitment.promise_text or '').strip():
         # Not enough signal to compare
         return []
 
@@ -69,7 +79,7 @@ async def detect_contradictions(
     for old in candidates:
         old_promise_stripped = _DEADLINE_WORDS.sub('', (old.get('promise_text') or '')).strip().lower()
         new_promise_stripped = _DEADLINE_WORDS.sub('', (new_commitment.promise_text or '')).strip().lower()
-        if old_promise_stripped and new_promise_stripped and old_promise_stripped == new_promise_stripped:
+        if old_promise_stripped and new_promise_stripped and _jaccard(old_promise_stripped, new_promise_stripped) >= 0.60:
             reason = (
                 f"Same commitment '{new_commitment.promise_text}' sent as two distinct messages "
                 f"— deadline revised"
