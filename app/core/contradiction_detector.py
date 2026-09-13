@@ -9,6 +9,7 @@ We mark the *older* commitment as `contradicted` and fire a webhook.
 from __future__ import annotations
 
 import logging
+import re
 import uuid
 from datetime import datetime, timezone
 from typing import Any
@@ -22,6 +23,12 @@ logger = logging.getLogger(__name__)
 # Statuses that are still "live" — candidates for contradiction
 # Only statuses that can legally transition to contradicted (per state_machine.py)
 _LIVE_STATUSES = ("open", "due", "overdue", "blocked", "pending_review", "detected")
+
+_DEADLINE_WORDS = re.compile(
+    r'\b(monday|tuesday|wednesday|thursday|friday|saturday|sunday'
+    r'|today|tomorrow|next week|eod|end of day|by \w+|on \w+day)\b',
+    re.IGNORECASE
+)
 
 
 async def detect_contradictions(
@@ -60,9 +67,9 @@ async def detect_contradictions(
     contradictions: list[dict[str, Any]] = []
 
     for old in candidates:
-        old_promise = (old.get('promise_text') or '').strip().lower()
-        new_promise = (new_commitment.promise_text or '').strip().lower()
-        if old_promise and new_promise and old_promise == new_promise:
+        old_promise_stripped = _DEADLINE_WORDS.sub('', (old.get('promise_text') or '')).strip().lower()
+        new_promise_stripped = _DEADLINE_WORDS.sub('', (new_commitment.promise_text or '')).strip().lower()
+        if old_promise_stripped and new_promise_stripped and old_promise_stripped == new_promise_stripped:
             reason = (
                 f"Same commitment '{new_commitment.promise_text}' sent as two distinct messages "
                 f"— deadline revised"
