@@ -52,7 +52,7 @@ async def detect_contradictions(
     try:
         resp = await (
             sb.table("commitments")
-            .select("id,action,object,recipient,deadline,deadline_expression,due_condition,promise_text,status,created_at")
+            .select("id,action,object,recipient,deadline_expression,due_condition,promise_text,status,created_at")
             .eq("user_id", user_id)
             .eq("source_agent_id", str(new_commitment.source_agent_id))
             .in_("status", list(_LIVE_STATUSES))
