@@ -2,7 +2,7 @@
 import logging
 from datetime import datetime, timedelta, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
 from slowapi import _rate_limit_exceeded_handler
 from app.core.rate_limit import limiter
 from pydantic import BaseModel, EmailStr
@@ -30,7 +30,11 @@ class KeyResponse(BaseModel):
 
 @limiter.limit("5/minute")
 @router.post("/keys/signup", response_model=KeyResponse, tags=["auth"])
-async def signup(request: Request, body: SignupRequest) -> KeyResponse:
+async def signup(
+    body: SignupRequest,
+    background_tasks: BackgroundTasks,
+    request: Request,
+) -> KeyResponse:
     """Generate a new API key. One key per email (idempotent)."""
     sb = get_supabase()
 
@@ -61,10 +65,14 @@ async def signup(request: Request, body: SignupRequest) -> KeyResponse:
 
     row = result.data[0]
 
-    # Only notify on genuine new signups, not idempotent re-signups
-    try:
-        created_at = row.get("created_at")
-        if created_at:
+    # Only notify on genuine new signups, not idempotent re-signups.
+    # Queued as a background task so the SMTP round-trip can never delay the
+    # response — awaiting it inline left the client on "Generating key...".
+    created_at = row.get("created_at")
+    if created_at:
+        # Narrow guard: only the parse can realistically fail, and a bad
+        # timestamp must not cost the user their API key.
+        try:
             if isinstance(created_at, str):
                 created_at_dt = datetime.fromisoformat(
                     created_at.replace("Z", "+00:00")
@@ -73,21 +81,24 @@ async def signup(request: Request, body: SignupRequest) -> KeyResponse:
                 created_at_dt = created_at
 
             # Supabase can hand back a naive timestamp; assume UTC so the
-            # subtraction can't raise and silently swallow the notification.
+            # subtraction behaves.
             if created_at_dt.tzinfo is None:
                 created_at_dt = created_at_dt.replace(tzinfo=timezone.utc)
 
             age = datetime.now(timezone.utc) - created_at_dt
-            if age < timedelta(seconds=10):
-                await notifier.notify_signup(
-                    email=row["email"],
-                    account_id=str(row["account_id"]),
-                    key_id=str(row["id"]),
-                    request_ip=request.client.host if request.client else None,
-                )
-    except Exception as e:
-        logger.error("Signup notification failed: %s", e)
-        # Never block signup for a notification failure
+            should_notify = age < timedelta(seconds=10)
+        except (ValueError, TypeError):
+            logger.warning("Could not parse created_at: %r", created_at)
+            should_notify = False
+
+        if should_notify:
+            background_tasks.add_task(
+                notifier.notify_signup,
+                email=row["email"],
+                account_id=str(row["account_id"]),
+                key_id=str(row["id"]),
+                request_ip=request.client.host if request.client else None,
+            )
 
     return KeyResponse(
         api_key=row["key"],
