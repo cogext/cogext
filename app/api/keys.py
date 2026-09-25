@@ -1,5 +1,6 @@
 """API key management — signup + rotation."""
 import logging
+from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from slowapi import _rate_limit_exceeded_handler
@@ -7,6 +8,7 @@ from app.core.rate_limit import limiter
 from pydantic import BaseModel, EmailStr
 
 from app.core.auth import Account, generate_api_key, get_current_account
+from app.core.signup_notifications import notifier
 from app.db.connection import get_supabase
 
 logger = logging.getLogger(__name__)
@@ -58,6 +60,35 @@ async def signup(request: Request, body: SignupRequest) -> KeyResponse:
         raise HTTPException(status_code=500, detail="Failed to create key")
 
     row = result.data[0]
+
+    # Only notify on genuine new signups, not idempotent re-signups
+    try:
+        created_at = row.get("created_at")
+        if created_at:
+            if isinstance(created_at, str):
+                created_at_dt = datetime.fromisoformat(
+                    created_at.replace("Z", "+00:00")
+                )
+            else:
+                created_at_dt = created_at
+
+            # Supabase can hand back a naive timestamp; assume UTC so the
+            # subtraction can't raise and silently swallow the notification.
+            if created_at_dt.tzinfo is None:
+                created_at_dt = created_at_dt.replace(tzinfo=timezone.utc)
+
+            age = datetime.now(timezone.utc) - created_at_dt
+            if age < timedelta(seconds=10):
+                await notifier.notify_signup(
+                    email=row["email"],
+                    account_id=str(row["account_id"]),
+                    key_id=str(row["id"]),
+                    request_ip=request.client.host if request.client else None,
+                )
+    except Exception as e:
+        logger.error("Signup notification failed: %s", e)
+        # Never block signup for a notification failure
+
     return KeyResponse(
         api_key=row["key"],
         account_id=row["account_id"],

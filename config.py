@@ -16,6 +16,15 @@ class Settings(BaseSettings):
     APP_ENV: str = "development"
     SLACK_WEBHOOK_URL: str = ""
     ACTION_TOKEN_SECRET: str = ""
+    # Present in .env and read via os.getenv in app/api/paypal_webhook.py.
+    # Declared here because pydantic-settings rejects undeclared env keys.
+    RESEND_API_KEY: str = ""
+    PAYPAL_WEBHOOK_ID: str = ""
+    SMTP_HOST: str = "smtp.gmail.com"
+    SMTP_PORT: int = 465
+    SMTP_USER: str = ""
+    SMTP_PASSWORD: str = ""
+    NOTIFY_EMAIL: str = "hello@cogextai.com"
 
 
 settings = Settings()
