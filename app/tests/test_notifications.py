@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from unittest.mock import Mock
 
 import pytest
+import resend
 from fastapi import BackgroundTasks
 from starlette.requests import Request
 
@@ -29,9 +30,10 @@ class _FakeSMTP:
 
     instances: list["_FakeSMTP"] = []
 
-    def __init__(self, host, port):
+    def __init__(self, host, port, timeout=None):
         self.host = host
         self.port = port
+        self.timeout = timeout
         self.login = Mock()
         self.send_message = Mock()
         _FakeSMTP.instances.append(self)
@@ -47,6 +49,9 @@ class _FakeSMTP:
 def smtp_configured(monkeypatch):
     """Point settings at a working SMTP account and capture SMTP_SSL calls."""
     _FakeSMTP.instances = []
+    # Force the SMTP branch — .env ships a real RESEND_API_KEY, and we must
+    # never let a unit test reach the live Resend API.
+    monkeypatch.setattr(settings, "RESEND_API_KEY", "")
     monkeypatch.setattr(settings, "SMTP_USER", "bot@cogextai.com")
     monkeypatch.setattr(settings, "SMTP_PASSWORD", "app-password")
     monkeypatch.setattr(settings, "NOTIFY_EMAIL", "hello@cogextai.com")
@@ -135,6 +140,7 @@ class _FakeSupabase:
 async def test_notify_no_config(monkeypatch):
     """Empty SMTP_USER/PASSWORD → skip quietly, no exception, no SMTP call."""
     smtp_ssl = Mock()
+    monkeypatch.setattr(settings, "RESEND_API_KEY", "")
     monkeypatch.setattr(settings, "SMTP_USER", "")
     monkeypatch.setattr(settings, "SMTP_PASSWORD", "")
     monkeypatch.setattr(settings, "NOTIFY_EMAIL", "hello@cogextai.com")
@@ -152,6 +158,7 @@ async def test_notify_no_config(monkeypatch):
 async def test_notify_no_config_missing_password_only(monkeypatch):
     """A user without a password is still 'not configured'."""
     smtp_ssl = Mock()
+    monkeypatch.setattr(settings, "RESEND_API_KEY", "")
     monkeypatch.setattr(settings, "SMTP_USER", "bot@cogextai.com")
     monkeypatch.setattr(settings, "SMTP_PASSWORD", "")
     monkeypatch.setattr(smtplib, "SMTP_SSL", smtp_ssl)
@@ -166,16 +173,20 @@ async def test_notify_no_config_missing_password_only(monkeypatch):
 async def test_notify_skips_when_notify_email_empty(monkeypatch):
     """Missing NOTIFY_EMAIL is also a quiet skip."""
     smtp_ssl = Mock()
+    resend_send = Mock()
+    monkeypatch.setattr(settings, "RESEND_API_KEY", "re_test_key")
     monkeypatch.setattr(settings, "SMTP_USER", "bot@cogextai.com")
     monkeypatch.setattr(settings, "SMTP_PASSWORD", "app-password")
     monkeypatch.setattr(settings, "NOTIFY_EMAIL", "")
     monkeypatch.setattr(smtplib, "SMTP_SSL", smtp_ssl)
+    monkeypatch.setattr(resend.Emails, "send", resend_send)
 
     await Notifier().notify_signup(
         email="new@example.com", account_id="acct-1", key_id="key-1"
     )
 
     smtp_ssl.assert_not_called()
+    resend_send.assert_not_called()
 
 
 async def test_notify_sends_email(smtp_configured):
@@ -221,7 +232,7 @@ async def test_notify_uses_configured_host_and_port(smtp_configured, monkeypatch
 async def test_notify_handles_failure(smtp_configured, monkeypatch):
     """A raising SMTP_SSL must not propagate out of notify_signup."""
 
-    def _boom(host, port):
+    def _boom(host, port, timeout=None):
         raise smtplib.SMTPException("connection refused")
 
     monkeypatch.setattr(smtplib, "SMTP_SSL", _boom)
@@ -250,7 +261,7 @@ async def test_notify_handles_login_failure(smtp_configured, monkeypatch):
 async def test_notify_logs_failure(smtp_configured, monkeypatch, caplog):
     """Failures are logged at ERROR so they're visible in production."""
 
-    def _boom(host, port):
+    def _boom(host, port, timeout=None):
         raise smtplib.SMTPException("connection refused")
 
     monkeypatch.setattr(smtplib, "SMTP_SSL", _boom)
@@ -261,6 +272,62 @@ async def test_notify_logs_failure(smtp_configured, monkeypatch, caplog):
         )
 
     assert any("Failed to send signup notification" in r.message for r in caplog.records)
+
+
+# ── Resend transport (the one that works on Render's free tier) ──────────────
+
+async def test_notify_prefers_resend_when_key_present(monkeypatch):
+    """Resend is used when configured, and SMTP is never touched."""
+    sent: list[dict] = []
+    smtp_ssl = Mock()
+
+    monkeypatch.setattr(settings, "RESEND_API_KEY", "re_test_key")
+    monkeypatch.setattr(settings, "NOTIFY_EMAIL", "hello@cogextai.com")
+    monkeypatch.setattr(settings, "NOTIFY_FROM", "hello@cogextai.com")
+    monkeypatch.setattr(smtplib, "SMTP_SSL", smtp_ssl)
+    monkeypatch.setattr(resend.Emails, "send", lambda payload: sent.append(payload))
+
+    await Notifier().notify_signup(
+        email="new@example.com",
+        account_id="acct-1",
+        key_id="abcdef1234567890",
+        request_ip="203.0.113.7",
+    )
+
+    smtp_ssl.assert_not_called()
+    assert len(sent) == 1
+
+    payload = sent[0]
+    assert payload["to"] == ["hello@cogextai.com"]
+    assert payload["subject"] == "New COGEXT signup: new@example.com"
+    assert "hello@cogextai.com" in payload["from"]
+    assert "new@example.com" in payload["html"]
+
+
+async def test_notify_resend_failure_does_not_raise(monkeypatch, caplog):
+    """A Resend outage is logged, never propagated into signup."""
+    def _boom(payload):
+        raise RuntimeError("resend down")
+
+    monkeypatch.setattr(settings, "RESEND_API_KEY", "re_test_key")
+    monkeypatch.setattr(settings, "NOTIFY_EMAIL", "hello@cogextai.com")
+    monkeypatch.setattr(resend.Emails, "send", _boom)
+
+    with caplog.at_level(logging.ERROR):
+        await Notifier().notify_signup(
+            email="new@example.com", account_id="acct-1", key_id="key-1"
+        )
+
+    assert any("via Resend" in r.message for r in caplog.records)
+
+
+async def test_smtp_call_sets_a_timeout(smtp_configured):
+    """Render blackholes SMTP ports, so the socket must time out."""
+    await notifier.notify_signup(
+        email="new@example.com", account_id="acct-1", key_id="key-1"
+    )
+
+    assert smtp_configured.instances[0].timeout == 10
 
 
 # ── Signup handler: notification is queued, never awaited inline ─────────────
@@ -519,7 +586,7 @@ async def test_response_flushed_before_smtp_over_real_asgi_stack(monkeypatch):
     order: list[str] = []
 
     class _RecordingSMTP:
-        def __init__(self, host, port):
+        def __init__(self, host, port, timeout=None):
             pass
 
         def __enter__(self):
@@ -535,6 +602,9 @@ async def test_response_flushed_before_smtp_over_real_asgi_stack(monkeypatch):
             order.append("SMTP")
 
     monkeypatch.setattr(smtplib, "SMTP_SSL", _RecordingSMTP)
+    # Force the SMTP branch: with the real RESEND_API_KEY from .env this test
+    # would otherwise make a live Resend API call.
+    monkeypatch.setattr(settings, "RESEND_API_KEY", "")
     monkeypatch.setattr(settings, "SMTP_USER", "bot@cogextai.com")
     monkeypatch.setattr(settings, "SMTP_PASSWORD", "app-password")
     monkeypatch.setattr(settings, "NOTIFY_EMAIL", "hello@cogextai.com")

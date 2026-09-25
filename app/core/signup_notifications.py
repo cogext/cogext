@@ -10,19 +10,56 @@ from datetime import datetime, timezone
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 
+import resend
+
 from config import settings
 
 logger = logging.getLogger(__name__)
 
+# Render's free tier blocks outbound traffic to SMTP ports 25/465/587, and it
+# drops the packets rather than refusing them — so smtplib needs an explicit
+# timeout or it blocks forever. Resend goes over HTTPS and always works.
+_SMTP_TIMEOUT_SECONDS = 10
+
 
 class Notifier:
     def _send_email(self, subject: str, html: str) -> None:
-        """Send email via SMTP. Never raises — logs on failure."""
-        if not settings.SMTP_USER or not settings.SMTP_PASSWORD:
-            logger.warning("SMTP credentials not configured, skipping email")
-            return
+        """Send the notification. Never raises — logs on failure.
+
+        Prefers Resend (HTTPS) and falls back to SMTP. On Render's free tier
+        the SMTP path cannot work at all, so Resend is the production route.
+        """
         if not settings.NOTIFY_EMAIL:
             logger.warning("NOTIFY_EMAIL not configured, skipping email")
+            return
+
+        if settings.RESEND_API_KEY:
+            self._send_via_resend(subject, html)
+            return
+
+        self._send_via_smtp(subject, html)
+
+    def _send_via_resend(self, subject: str, html: str) -> None:
+        try:
+            resend.api_key = settings.RESEND_API_KEY
+            resend.Emails.send({
+                "from": f"COGEXT <{settings.NOTIFY_FROM}>",
+                "to": [settings.NOTIFY_EMAIL],
+                "subject": subject,
+                "html": html,
+            })
+            logger.info(
+                "Signup notification sent to %s via Resend", settings.NOTIFY_EMAIL
+            )
+        except Exception as e:
+            logger.error("Failed to send signup notification via Resend: %s", e)
+
+    def _send_via_smtp(self, subject: str, html: str) -> None:
+        if not settings.SMTP_USER or not settings.SMTP_PASSWORD:
+            logger.warning(
+                "Neither RESEND_API_KEY nor SMTP credentials are configured, "
+                "skipping email"
+            )
             return
 
         try:
@@ -32,7 +69,11 @@ class Notifier:
             msg["To"] = settings.NOTIFY_EMAIL
             msg.attach(MIMEText(html, "html"))
 
-            with smtplib.SMTP_SSL(settings.SMTP_HOST, settings.SMTP_PORT) as smtp:
+            with smtplib.SMTP_SSL(
+                settings.SMTP_HOST,
+                settings.SMTP_PORT,
+                timeout=_SMTP_TIMEOUT_SECONDS,
+            ) as smtp:
                 smtp.login(settings.SMTP_USER, settings.SMTP_PASSWORD)
                 smtp.send_message(msg)
 
@@ -41,10 +82,10 @@ class Notifier:
             logger.error("Failed to send signup notification: %s", e)
 
     async def _send_email_async(self, subject: str, html: str) -> None:
-        """Run the blocking SMTP send in a worker thread.
+        """Run the blocking send in a worker thread.
 
-        smtplib is synchronous; calling it directly from a coroutine would
-        block the event loop for the whole SMTP round-trip.
+        Both resend and smtplib are synchronous; calling them directly from a
+        coroutine would block the event loop for the whole round-trip.
         """
         await asyncio.to_thread(self._send_email, subject, html)
 

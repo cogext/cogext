@@ -25,6 +25,8 @@ class Settings(BaseSettings):
     SMTP_USER: str = ""
     SMTP_PASSWORD: str = ""
     NOTIFY_EMAIL: str = "hello@cogextai.com"
+    # Sender for notification mail. Must be on a domain verified in Resend.
+    NOTIFY_FROM: str = "hello@cogextai.com"
 
 
 settings = Settings()
