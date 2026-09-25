@@ -1,4 +1,4 @@
-"""COGEXT V1.9 – Application entry point."""
+"""COGEXT v2.0 – Application entry point."""
 import json
 from contextlib import asynccontextmanager
 
@@ -40,7 +40,7 @@ async def lifespan(app: FastAPI):
     await close_supabase()
 
 
-app = FastAPI(title="COGEXT", version="1.9.0", lifespan=lifespan)
+app = FastAPI(title="COGEXT", version="2.0.0", lifespan=lifespan)
 
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
@@ -100,7 +100,7 @@ async def root():
     """Service info — no auth required."""
     return {
         "name": "COGEXT",
-        "version": "1.9.0",
+        "version": "2.0.0",
         "status": "ok",
         "description": "AI agent commitment-tracking infrastructure",
         "docs": "/docs",
@@ -110,7 +110,7 @@ async def root():
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "version": "1.9.0"}
+    return {"status": "ok", "version": "2.0.0"}
 
 
 @app.get("/db-check")
