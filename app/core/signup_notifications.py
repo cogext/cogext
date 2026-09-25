@@ -3,6 +3,7 @@
 Kept separate from ``app.core.notifications`` (the Slack kill-switch module)
 so the two concerns stay independent.
 """
+import asyncio
 import logging
 import smtplib
 from datetime import datetime, timezone
@@ -38,6 +39,14 @@ class Notifier:
             logger.info("Signup notification sent to %s", settings.NOTIFY_EMAIL)
         except Exception as e:
             logger.error("Failed to send signup notification: %s", e)
+
+    async def _send_email_async(self, subject: str, html: str) -> None:
+        """Run the blocking SMTP send in a worker thread.
+
+        smtplib is synchronous; calling it directly from a coroutine would
+        block the event loop for the whole SMTP round-trip.
+        """
+        await asyncio.to_thread(self._send_email, subject, html)
 
     async def notify_signup(
         self,
@@ -108,7 +117,7 @@ class Notifier:
         </html>
         """
 
-        self._send_email(subject, html)
+        await self._send_email_async(subject, html)
 
 
 notifier = Notifier()

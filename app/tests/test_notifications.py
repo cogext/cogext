@@ -4,12 +4,16 @@ idempotency guard in the POST /keys/signup handler.
 These tests are hermetic: every test sets the SMTP settings it depends on via
 monkeypatch, so a populated local .env can't change the outcome.
 """
+import asyncio
 import logging
 import smtplib
+import threading
+import time
 from datetime import datetime, timezone
 from unittest.mock import Mock
 
 import pytest
+from fastapi import BackgroundTasks
 from starlette.requests import Request
 
 import app.api.keys as keys_module
@@ -259,59 +263,99 @@ async def test_notify_logs_failure(smtp_configured, monkeypatch, caplog):
     assert any("Failed to send signup notification" in r.message for r in caplog.records)
 
 
-# ── Signup handler idempotency ───────────────────────────────────────────────
+# ── Signup handler: notification is queued, never awaited inline ─────────────
 
 def _handler():
     """The undecorated signup coroutine (bypasses the slowapi rate limiter)."""
     return getattr(keys_module.signup, "__wrapped__", keys_module.signup)
 
 
-async def test_signup_notifies_once_on_repeat_signup(monkeypatch):
-    """Signing up twice with the same email notifies exactly once."""
-    sb = _FakeSupabase()
-    monkeypatch.setattr(keys_module, "get_supabase", lambda: sb)
+async def _call_signup(
+    email: str,
+    background_tasks: BackgroundTasks,
+    request: Request | None = None,
+):
+    """Invoke the handler using FastAPI's keyword-style injection."""
+    return await _handler()(
+        body=SignupRequest(email=email),
+        background_tasks=background_tasks,
+        request=request or _make_request(),
+    )
 
+
+@pytest.fixture
+def notify_spy(monkeypatch):
+    """Capture notifier.notify_signup calls without sending anything."""
     calls: list[dict] = []
 
     async def _fake_notify(**kwargs):
         calls.append(kwargs)
 
     monkeypatch.setattr(notifier, "notify_signup", _fake_notify, raising=False)
+    return calls
 
-    request = _make_request()
-    first = await _handler()(request, SignupRequest(email="new@example.com"))
-    second = await _handler()(request, SignupRequest(email="new@example.com"))
 
-    assert len(calls) == 1
-    assert calls[0]["email"] == "new@example.com"
-    assert calls[0]["request_ip"] == "203.0.113.7"
+async def test_signup_returns_before_notification_runs(monkeypatch, notify_spy):
+    """The regression: the handler must not await the SMTP round-trip."""
+    sb = _FakeSupabase()
+    monkeypatch.setattr(keys_module, "get_supabase", lambda: sb)
+
+    background_tasks = BackgroundTasks()
+    response = await _call_signup("new@example.com", background_tasks)
+
+    # The response is fully built while the send is still only queued.
+    assert response.api_key.startswith("cg_live_")
+    assert notify_spy == []
+    assert len(background_tasks.tasks) == 1
+
+    # Draining the queue is what actually performs the send.
+    await background_tasks()
+
+    assert len(notify_spy) == 1
+    assert notify_spy[0]["email"] == "new@example.com"
+    assert notify_spy[0]["request_ip"] == "203.0.113.7"
+
+
+async def test_signup_notifies_once_on_repeat_signup(monkeypatch, notify_spy):
+    """Signing up twice with the same email queues exactly one notification."""
+    sb = _FakeSupabase()
+    monkeypatch.setattr(keys_module, "get_supabase", lambda: sb)
+
+    background_tasks = BackgroundTasks()
+    first = await _call_signup("new@example.com", background_tasks)
+    second = await _call_signup("new@example.com", background_tasks)
+
+    assert len(background_tasks.tasks) == 1
+
+    await background_tasks()
+
+    assert len(notify_spy) == 1
 
     # Idempotent: the same key comes back, and only one row was ever inserted.
     assert first.api_key == second.api_key
     assert len(sb.rows) == 1
 
 
-async def test_signup_notifies_once_for_distinct_emails(monkeypatch):
+async def test_signup_notifies_once_for_distinct_emails(monkeypatch, notify_spy):
     """Two different emails → two separate notifications."""
     sb = _FakeSupabase()
     monkeypatch.setattr(keys_module, "get_supabase", lambda: sb)
 
-    calls: list[dict] = []
+    background_tasks = BackgroundTasks()
+    await _call_signup("a@example.com", background_tasks)
+    await _call_signup("b@example.com", background_tasks)
 
-    async def _fake_notify(**kwargs):
-        calls.append(kwargs)
+    await background_tasks()
 
-    monkeypatch.setattr(notifier, "notify_signup", _fake_notify, raising=False)
-
-    request = _make_request()
-    await _handler()(request, SignupRequest(email="a@example.com"))
-    await _handler()(request, SignupRequest(email="b@example.com"))
-
-    assert [c["email"] for c in calls] == ["a@example.com", "b@example.com"]
+    assert [c["email"] for c in notify_spy] == ["a@example.com", "b@example.com"]
 
 
-async def test_signup_survives_notifier_exception(monkeypatch):
-    """A raising notifier must never break signup."""
+async def test_signup_response_unaffected_by_notifier_failure(monkeypatch):
+    """A raising notifier still yields a valid response.
+
+    The error surfaces only when the queue drains — i.e. after the client has
+    already been answered. Starlette does not swallow background exceptions.
+    """
     sb = _FakeSupabase()
     monkeypatch.setattr(keys_module, "get_supabase", lambda: sb)
 
@@ -320,15 +364,19 @@ async def test_signup_survives_notifier_exception(monkeypatch):
 
     monkeypatch.setattr(notifier, "notify_signup", _boom, raising=False)
 
-    response = await _handler()(
-        _make_request(), SignupRequest(email="new@example.com")
-    )
+    background_tasks = BackgroundTasks()
+    response = await _call_signup("new@example.com", background_tasks)
 
     assert response.email == "new@example.com"
     assert response.api_key.startswith("cg_live_")
 
+    with pytest.raises(RuntimeError):
+        await background_tasks()
 
-async def test_signup_does_not_notify_when_row_has_no_created_at(monkeypatch):
+
+async def test_signup_does_not_notify_when_row_has_no_created_at(
+    monkeypatch, notify_spy
+):
     """If created_at is absent we can't prove it's new → stay silent."""
     sb = _FakeSupabase()
     monkeypatch.setattr(keys_module, "get_supabase", lambda: sb)
@@ -343,19 +391,45 @@ async def test_signup_does_not_notify_when_row_has_no_created_at(monkeypatch):
 
     monkeypatch.setattr(_FakeQuery, "execute", _execute_without_created_at)
 
-    calls: list[dict] = []
+    background_tasks = BackgroundTasks()
+    await _call_signup("new@example.com", background_tasks)
+    await background_tasks()
 
-    async def _fake_notify(**kwargs):
-        calls.append(kwargs)
-
-    monkeypatch.setattr(notifier, "notify_signup", _fake_notify, raising=False)
-
-    await _handler()(_make_request(), SignupRequest(email="new@example.com"))
-
-    assert calls == []
+    assert notify_spy == []
+    assert background_tasks.tasks == []
 
 
-async def test_signup_does_not_notify_for_stale_row(monkeypatch):
+async def test_signup_survives_unparseable_created_at(monkeypatch, notify_spy, caplog):
+    """A malformed created_at must not cost the user their API key."""
+    sb = _FakeSupabase()
+    monkeypatch.setattr(keys_module, "get_supabase", lambda: sb)
+
+    original_execute = _FakeQuery.execute
+
+    async def _execute_malformed(self):
+        response = await original_execute(self)
+        for row in response.data or []:
+            row["created_at"] = "not-a-timestamp"
+        return response
+
+    monkeypatch.setattr(_FakeQuery, "execute", _execute_malformed)
+
+    background_tasks = BackgroundTasks()
+    with caplog.at_level(logging.WARNING):
+        response = await _call_signup("new@example.com", background_tasks)
+
+    # Signup still succeeds and returns a usable key.
+    assert response.api_key.startswith("cg_live_")
+    assert response.email == "new@example.com"
+
+    # Nothing was queued, and the reason was logged.
+    assert background_tasks.tasks == []
+    await background_tasks()
+    assert notify_spy == []
+    assert any("Could not parse created_at" in r.message for r in caplog.records)
+
+
+async def test_signup_does_not_notify_for_stale_row(monkeypatch, notify_spy):
     """A row older than the 10s window is treated as a re-signup."""
     from datetime import timedelta
 
@@ -373,13 +447,145 @@ async def test_signup_does_not_notify_for_stale_row(monkeypatch):
 
     monkeypatch.setattr(_FakeQuery, "execute", _execute_stale)
 
-    calls: list[dict] = []
+    background_tasks = BackgroundTasks()
+    await _call_signup("new@example.com", background_tasks)
+    await background_tasks()
 
-    async def _fake_notify(**kwargs):
-        calls.append(kwargs)
+    assert notify_spy == []
+    assert background_tasks.tasks == []
 
-    monkeypatch.setattr(notifier, "notify_signup", _fake_notify, raising=False)
 
-    await _handler()(_make_request(), SignupRequest(email="new@example.com"))
+# ── Blocking SMTP must not stall the event loop ──────────────────────────────
 
-    assert calls == []
+async def test_send_email_async_runs_in_worker_thread(monkeypatch):
+    """_send_email executes off the event-loop thread."""
+    seen: dict = {}
+
+    def _record(subject, html):
+        seen["thread"] = threading.current_thread()
+
+    instance = Notifier()
+    monkeypatch.setattr(instance, "_send_email", _record)
+
+    await instance._send_email_async("subject", "<html></html>")
+
+    assert "thread" in seen
+    assert seen["thread"] is not threading.current_thread()
+
+
+async def test_send_email_async_keeps_event_loop_responsive(monkeypatch):
+    """A slow SMTP send must not block other coroutines."""
+    instance = Notifier()
+    monkeypatch.setattr(instance, "_send_email", lambda s, h: time.sleep(0.2))
+
+    ticks = 0
+
+    async def _ticker():
+        nonlocal ticks
+        while True:
+            await asyncio.sleep(0.01)
+            ticks += 1
+
+    task = asyncio.create_task(_ticker())
+    try:
+        await instance._send_email_async("subject", "<html></html>")
+    finally:
+        task.cancel()
+
+    # A direct (blocking) call would have starved the loop: ticks would be 0.
+    assert ticks >= 5
+
+
+# ── Regression: the response must be flushed before SMTP runs ────────────────
+
+async def test_response_flushed_before_smtp_over_real_asgi_stack(monkeypatch):
+    """End-to-end through FastAPI + slowapi + BackgroundTasks.
+
+    Guards the reported regression: the client used to hang on
+    "Generating key..." because the handler awaited the SMTP round-trip.
+    """
+    import json
+
+    from fastapi import FastAPI
+    from slowapi import _rate_limit_exceeded_handler
+    from slowapi.errors import RateLimitExceeded
+    from slowapi.middleware import SlowAPIMiddleware
+
+    from app.core.rate_limit import limiter
+
+    sb = _FakeSupabase()
+    monkeypatch.setattr(keys_module, "get_supabase", lambda: sb)
+
+    order: list[str] = []
+
+    class _RecordingSMTP:
+        def __init__(self, host, port):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc_info):
+            return False
+
+        def login(self, user, password):
+            pass
+
+        def send_message(self, msg):
+            order.append("SMTP")
+
+    monkeypatch.setattr(smtplib, "SMTP_SSL", _RecordingSMTP)
+    monkeypatch.setattr(settings, "SMTP_USER", "bot@cogextai.com")
+    monkeypatch.setattr(settings, "SMTP_PASSWORD", "app-password")
+    monkeypatch.setattr(settings, "NOTIFY_EMAIL", "hello@cogextai.com")
+
+    app = FastAPI()
+    app.state.limiter = limiter
+    app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+    app.add_middleware(SlowAPIMiddleware)
+    app.include_router(keys_module.router, prefix="/api/v1")
+
+    body = json.dumps({"email": "brand-new@example.com"}).encode()
+    scope = {
+        "type": "http",
+        "asgi": {"version": "3.0"},
+        "http_version": "1.1",
+        "method": "POST",
+        "scheme": "http",
+        "path": "/api/v1/keys/signup",
+        "raw_path": b"/api/v1/keys/signup",
+        "query_string": b"",
+        "headers": [
+            (b"host", b"testserver"),
+            (b"content-type", b"application/json"),
+            (b"content-length", str(len(body)).encode()),
+        ],
+        "client": ("203.0.113.9", 5555),
+        "server": ("testserver", 80),
+        "root_path": "",
+    }
+
+    captured: dict = {}
+
+    async def receive():
+        return {"type": "http.request", "body": body, "more_body": False}
+
+    async def send(message):
+        if message["type"] == "http.response.start":
+            captured["status"] = message["status"]
+        elif message["type"] == "http.response.body":
+            order.append("RESPONSE")
+            captured["body"] = captured.get("body", b"") + message.get("body", b"")
+
+    await app(scope, receive, send)
+
+    assert captured["status"] == 200
+    assert json.loads(captured["body"])["api_key"].startswith("cg_live_")
+
+    # Every response chunk precedes the SMTP send. (slowapi's
+    # BaseHTTPMiddleware may emit more than one body message.)
+    assert order.count("SMTP") == 1
+    response_indexes = [i for i, event in enumerate(order) if event == "RESPONSE"]
+    assert response_indexes, "no response body was ever sent"
+    assert max(response_indexes) < order.index("SMTP")
+
