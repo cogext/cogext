@@ -5,8 +5,7 @@
 [![Tests](https://github.com/cogext/cogext/actions/workflows/ci.yml/badge.svg)](https://github.com/cogext/cogext/actions/workflows/ci.yml)
 [![PyPI version](https://badge.fury.io/py/cogext.svg)](https://pypi.org/project/cogext/)
 [![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](http://makeapullrequest.com)
+[![License: Proprietary](https://img.shields.io/badge/License-Proprietary-red.svg)](#license)
 
 COGEXT turns the promises AI agents make into first-class, trackable objects. It extracts
 commitments from agent messages, follows them through a 12-state lifecycle, requires
@@ -388,12 +387,14 @@ Two operational notes learned the hard way:
 
 ---
 
-## Contributing
+## Open Source Components
 
-Contributions are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, code
-style (ruff, black, mypy) and commit conventions. Bug reports and feature requests have
-templates under [`.github/ISSUE_TEMPLATE/`](.github/ISSUE_TEMPLATE/); open-ended questions are
-best raised in [Discussions](https://github.com/cogext/cogext/discussions).
+While this repository is proprietary, some adjacent components are 
+open source:
+
+- [cogext-primitive](https://github.com/yaminbinyoosuf/cogext-primitive) — local commitment extraction (MIT)
+- [cogext-compliance](https://github.com/yaminbinyoosuf/cogext-compliance) — test the standard (MIT)
+- [COGEXT Standard v0.1](https://cogextai.com/standard) — the specification (CC BY 4.0)
 
 ---
 
@@ -406,7 +407,12 @@ issue. [SECURITY.md](SECURITY.md) covers scope, response timelines and our credi
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+Copyright (c) 2026 Yamin / THRYVIX. All rights reserved.
+
+This repository is proprietary. See [LICENSE](LICENSE) for terms.
+
+Open-source components (primitive, compliance, standard) are licensed 
+separately under MIT and CC BY 4.0.
 
 ---
 

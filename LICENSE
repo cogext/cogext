@@ -1,0 +1,16 @@
+Copyright (c) 2026 Yamin / THRYVIX. All rights reserved.
+
+This repository contains the COGEXT API server — a commercial product.
+You may view the source code for reference. You may not copy, modify, 
+distribute, or use it in production without a license.
+
+For commercial licensing: hello@cogextai.com
+
+The following components are separately licensed and open source:
+
+  - cogext-primitive (pip install cogext-primitive) — MIT
+  - cogext-compliance (pip install cogext-compliance) — MIT
+  - COGEXT Standard v0.1 (cogextai.com/standard) — CC BY 4.0
+
+Those licenses apply to those components only. This repository is 
+not covered by them.
