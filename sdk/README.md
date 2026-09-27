@@ -62,4 +62,7 @@ Works with sync and async methods. Never raises — errors are logged as warning
 
 ## License
 
-MIT — free to use, modify and distribute.
+Proprietary. Copyright (c) 2026 Yamin / THRYVIX. All rights reserved.
+
+The COGEXT SDK is part of the COGEXT commercial product and is not open source.
+For commercial licensing, contact hello@cogextai.com
