@@ -8,7 +8,6 @@ import uuid
 from typing import Any
 
 from .client import CogextClient
-from .exceptions import CogextConfigError
 
 logger = logging.getLogger(__name__)
 

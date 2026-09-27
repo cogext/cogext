@@ -24,7 +24,6 @@ tracked = track(
     api_key=os.environ["COGEXT_API_KEY"],
     user_id=os.environ["COGEXT_USER_ID"],
     agent_id="my-agent-001",
-    base_url="http://localhost:8000/api/v1",
 )
 
 # Any output from .run() that contains a commitment is automatically tracked
@@ -47,13 +46,20 @@ print(commitments)
 |---|---|
 | `COGEXT_API_KEY` | Your API key (any non-empty string in v1) |
 | `COGEXT_USER_ID` | UUID that identifies the end user |
-| `COGEXT_BASE_URL` | Override the backend URL (default: `http://localhost:8000/api/v1`) |
+| `COGEXT_BASE_URL` | Override the API base URL (default: `https://cogext.onrender.com/api/v1`) |
 
 ## Supported agent methods
 
 `track()` intercepts: `.run()`, `.invoke()`, `.chat()`, `.complete()`, and `__call__`.
 Works with sync and async methods. Never raises — errors are logged as warnings.
 
----
+## Links
 
-More at [cogextai.com](https://cogextai.com)
+- Homepage: https://cogextai.com
+- Documentation: https://docs.cogextai.com
+- Source: https://github.com/cogext/cogext
+- Issues: https://github.com/cogext/cogext/issues
+
+## License
+
+MIT — free to use, modify and distribute.

@@ -12,7 +12,7 @@ import httpx
 
 from .exceptions import CogextAPIError, CogextConfigError
 
-_DEFAULT_BASE_URL = "https://cogext.onrender.com/api/v1"
+_DEFAULT_BASE_URL = "https://api.cogextai.com/api/v1"
 
 
 class CogextClient:
