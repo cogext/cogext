@@ -17,8 +17,6 @@ from app.db.connection import get_supabase
 
 router = APIRouter()
 
-MAX_EVENTS = 500
-
 
 class SessionCreate(BaseModel):
     session_id: str
@@ -90,24 +88,16 @@ async def create_session(body: SessionCreate):
 
 @router.post("/event")
 async def log_event(body: EventLog):
-    """Append one event. Creates the session on first write."""
+    """Append one event. Creates the session on first write.
+
+    The append happens inside the live_append_event SQL function so two
+    in-flight tool calls from the same observer cannot overwrite each other.
+    """
     sb = get_supabase()
-    row = await sb.table("live_sessions").select("events").eq(
-        "session_id", body.session_id
-    ).execute()
-    if not row.data:
-        await sb.table("live_sessions").insert({
-            "session_id": body.session_id,
-            "events": [body.event],
-        }).execute()
-    else:
-        events = row.data[0].get("events") or []
-        events.append(body.event)
-        if len(events) > MAX_EVENTS:
-            events = events[-MAX_EVENTS:]
-        await sb.table("live_sessions").update({"events": events}).eq(
-            "session_id", body.session_id
-        ).execute()
+    await sb.rpc("live_append_event", {
+        "p_session_id": body.session_id,
+        "p_event": body.event,
+    }).execute()
     return {"ok": True}
 
 
