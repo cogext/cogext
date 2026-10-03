@@ -16,6 +16,7 @@ from app.api.evidence import router as evidence_router
 from app.api.events import router as events_router
 from app.api.ingest import router as ingest_router
 from app.api.keys import router as keys_router
+from app.api.live import router as live_router
 from app.api.privacy import router as privacy_router
 from app.api.recall import router as recall_router
 from app.api.refinements import router as refinements_router
@@ -47,7 +48,13 @@ app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 app.add_middleware(SlowAPIMiddleware)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["https://cogextai.com", "https://www.cogextai.com", "https://cogextai.pages.dev"],
+    allow_origins=[
+        "https://cogextai.com",
+        "https://www.cogextai.com",
+        "https://cogextai.pages.dev",
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -59,6 +66,7 @@ _V1 = "/api/v1"
 app.include_router(keys_router, prefix=_V1)  # /api/v1/keys/signup is public
 app.include_router(paypal_webhook_router, prefix=_V1, tags=["billing"])  # public — PayPal webhook
 app.include_router(audit_router, prefix=_V1, tags=["audit"])  # GET /audit/{token} is public; POST /commitments/{id}/receipt needs auth below too
+app.include_router(live_router, prefix=f"{_V1}/live", tags=["live"])  # public — observers hold no key
 
 # ── Protected routes (require API key) ────────────────────────────────────────
 _auth = {"dependencies": [Depends(get_current_account)]}
