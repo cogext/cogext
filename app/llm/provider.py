@@ -1,9 +1,13 @@
-"""LLM provider — supports Groq and DeepSeek."""
-import json
+"""LLM provider — DeepSeek is the active provider.
+
+Groq is retained only as a dead fallback: _groq_extract is reached solely when
+LLM_PROVIDER is explicitly set to "groq". Both APIs are OpenAI-compatible, so
+only the base URL, the model and the key env var differ.
+"""
 
 from config import settings
 
-# ── Groq ──────────────────────────────────────────────────────────────────────
+# ── Groq (dead fallback — unreachable unless LLM_PROVIDER="groq") ────────────
 _groq_client = None
 
 def _get_groq_client():
@@ -23,7 +27,7 @@ def _get_deepseek_client():
         from openai import OpenAI
         _deepseek_client = OpenAI(
             api_key=settings.DEEPSEEK_API_KEY,
-            base_url="https://api.deepseek.com",
+            base_url="https://api.deepseek.com/v1",
         )
     return _deepseek_client
 
