@@ -4,8 +4,9 @@ Public routes (no API key): the try-observer and the observe decorator
 both stream here from processes that hold no COGEXT key, and the two
 public pages (/live/:id, /r/:id, /square) read from here.
 
-Vendor names are stripped at publish time only. The original session keeps
-whatever the caller sent.
+Vendor names are stripped on the read path, never on write. The stored
+session always keeps exactly what the caller sent, so publishing never
+rewrites the events column and the raw record stays auditable.
 """
 from datetime import datetime, timezone
 from typing import Any
@@ -109,24 +110,41 @@ async def get_session(session_id: str):
     ).execute()
     if not row.data:
         raise HTTPException(404, "Session not found")
-    return row.data[0]
+    session = row.data[0]
+    if session.get("published"):
+        # The row keeps its raw events; stripping is a display concern and
+        # applies only once the session is on the Square.
+        session["events"] = _strip_vendors(session.get("events") or [])
+    return session
 
 
 @router.post("/publish")
 async def publish(body: PublishRequest):
-    """Publish a session to the Square. This is where vendor names go away."""
+    """Publish a session to the Square. This is where vendor names go away.
+
+    Only the two small flags are written. The events column is deliberately
+    never touched: rewriting a large JSONB array here exceeded Supabase's
+    statement timeout (Postgres 57014), and it also destroyed the original
+    events. Vendor names are removed on the read path instead.
+    """
     sb = get_supabase()
-    row = await sb.table("live_sessions").select("events").eq(
+    row = await sb.table("live_sessions").select("session_id").eq(
         "session_id", body.session_id
     ).execute()
     if not row.data:
         raise HTTPException(404, "Session not found")
-    stripped = _strip_vendors(row.data[0]["events"])
-    await sb.table("live_sessions").update({
-        "events": stripped,
-        "published": True,
-        "published_at": datetime.now(timezone.utc).isoformat(),
-    }).eq("session_id", body.session_id).execute()
+
+    await sb.table("live_sessions").update(
+        {
+            "published": True,
+            "published_at": datetime.now(timezone.utc).isoformat(),
+        },
+        # Without this, PostgREST answers with the whole updated row, dragging
+        # the events JSONB back over the wire on every publish. Only flags
+        # changed, so nothing needs to come back.
+        returning="minimal",
+    ).eq("session_id", body.session_id).execute()
+
     return {"ok": True, "url": f"https://cogextai.com/square#{body.session_id}"}
 
 
@@ -136,7 +154,17 @@ async def square():
     rows = await sb.table("live_sessions").select(
         "session_id,events,created_at,published_at"
     ).eq("published", True).order("published_at", desc=True).limit(100).execute()
-    return {"sessions": rows.data}
+
+    sessions = []
+    for row in rows.data:
+        sessions.append({
+            "session_id": row["session_id"],
+            "created_at": row["created_at"],
+            "published_at": row["published_at"],
+            "events": _strip_vendors(row.get("events") or []),
+        })
+
+    return {"sessions": sessions}
 
 
 @router.post("/receipt")
