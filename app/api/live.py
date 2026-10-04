@@ -8,6 +8,7 @@ Vendor names are stripped on the read path, never on write. The stored
 session always keeps exactly what the caller sent, so publishing never
 rewrites the events column and the raw record stays auditable.
 """
+import json
 from datetime import datetime, timezone
 from typing import Any
 
@@ -17,6 +18,74 @@ from pydantic import BaseModel
 from app.db.connection import get_supabase
 
 router = APIRouter()
+
+# ---------------------------------------------------------------------------
+# event size guard
+#
+# /event is public and unauthenticated, so its payload cannot be trusted. One
+# oversized event is how a session reached 14.8 MB and made publish hit
+# Supabase's statement timeout (Postgres 57014). Every string is capped first;
+# because bulk is usually structural rather than a single long string, the
+# whole event is then bounded as well.
+# ---------------------------------------------------------------------------
+MAX_EVENT_BYTES = 20_000
+MAX_FIELD_CHARS = 2_000
+
+
+def _truncate_event(obj, limit: int = MAX_FIELD_CHARS):
+    """Recursively truncate any string inside an event payload."""
+    if isinstance(obj, str):
+        return obj if len(obj) <= limit else obj[:limit] + "... [truncated]"
+    if isinstance(obj, dict):
+        return {k: _truncate_event(v, limit) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_truncate_event(v, limit) for v in obj]
+    return obj
+
+
+def _event_size(obj) -> int:
+    try:
+        return len(json.dumps(obj))
+    except Exception:
+        return MAX_EVENT_BYTES + 1
+
+
+def _bound_event(event, limit: int = MAX_EVENT_BYTES):
+    """Return an event guaranteed to serialise to at most `limit` bytes.
+
+    Capping individual fields is not enough on its own: a payload whose bulk is
+    structural (many medium fields, a large list) stays over the ceiling no
+    matter how short each string is, so the oversized values are replaced by a
+    preview as a last resort.
+    """
+    original = _event_size(event)
+    if original <= limit:
+        return event
+
+    event = _truncate_event(event)
+    if _event_size(event) <= limit:
+        return event
+
+    out: dict = {}
+    for key, value in (event.items() if isinstance(event, dict) else []):
+        if _event_size(value) > 2_000:
+            out[key] = {
+                "_truncated": True,
+                "_original_bytes": _event_size(value),
+                "preview": json.dumps(value)[:1_000],
+            }
+        else:
+            out[key] = value
+    out["_truncated"] = True
+    out["_original_bytes"] = original
+
+    if _event_size(out) > limit:
+        return {
+            "_truncated": True,
+            "_original_bytes": original,
+            "preview": json.dumps(event)[: limit // 2],
+        }
+    return out
 
 
 class SessionCreate(BaseModel):
@@ -94,6 +163,15 @@ async def log_event(body: EventLog):
     The append happens inside the live_append_event SQL function so two
     in-flight tool calls from the same observer cannot overwrite each other.
     """
+    # Guard against oversized events.
+    event_str = json.dumps(body.event)
+    if len(event_str) > MAX_EVENT_BYTES:
+        body.event = _truncate_event(body.event)
+    # Individual fields are capped above; this enforces the ceiling on the
+    # event as a whole, for payloads whose bulk is structural rather than one
+    # long string.
+    body.event = _bound_event(body.event)
+
     sb = get_supabase()
     await sb.rpc("live_append_event", {
         "p_session_id": body.session_id,
