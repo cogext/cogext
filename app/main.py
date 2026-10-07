@@ -11,6 +11,7 @@ from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
 from app.core.rate_limit import limiter
 from app.api.calibration import router as calibration_router
+from app.api import demo
 from app.api.dependencies import router as dependencies_router
 from app.api.evidence import router as evidence_router
 from app.api.events import router as events_router
@@ -67,6 +68,7 @@ app.include_router(keys_router, prefix=_V1)  # /api/v1/keys/signup is public
 app.include_router(paypal_webhook_router, prefix=_V1, tags=["billing"])  # public — PayPal webhook
 app.include_router(audit_router, prefix=_V1, tags=["audit"])  # GET /audit/{token} is public; POST /commitments/{id}/receipt needs auth below too
 app.include_router(live_router, prefix=f"{_V1}/live", tags=["live"])  # public — observers hold no key
+app.include_router(demo.router, prefix=_V1, tags=["demo"])  # public — homepage sandbox, no key
 
 # ── Protected routes (require API key) ────────────────────────────────────────
 _auth = {"dependencies": [Depends(get_current_account)]}
@@ -118,6 +120,11 @@ async def root():
 
 @app.get("/health")
 async def health():
+    return {"status": "ok", "version": "2.0.0"}
+
+
+@app.get("/api/v1/health")
+async def health_v1():
     return {"status": "ok", "version": "2.0.0"}
 
 
