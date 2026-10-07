@@ -18,6 +18,7 @@ class Settings(BaseSettings):
     APP_ENV: str = "development"
     SLACK_WEBHOOK_URL: str = ""
     ACTION_TOKEN_SECRET: str = ""
+    OBSERVE_RECEIPT_KEY: str = "cogext-observe-receipt-v1"
     # Present in .env and read via os.getenv in app/api/paypal_webhook.py.
     # Declared here because pydantic-settings rejects undeclared env keys.
     RESEND_API_KEY: str = ""

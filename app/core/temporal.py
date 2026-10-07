@@ -48,6 +48,7 @@ def resolve_deadline(
     raw_expression: str,
     anchor_timestamp: datetime,
     timezone_str: str = "UTC",
+    allow_llm_fallback: bool = True,
 ) -> TemporalResolution:
     """Resolve *raw_expression* relative to *anchor_timestamp*.
 
@@ -55,6 +56,8 @@ def resolve_deadline(
     that "EOD Friday" resolves correctly for an actor in Asia/Kolkata, not UTC.
     ``resolved_deadline`` is always returned in UTC.
     ``anchor_timestamp`` must be tz-aware; if naive it is treated as UTC.
+    Pass ``allow_llm_fallback=False`` to guarantee no outbound LLM call; an
+    expression that is not deterministically parseable then resolves to None.
     """
     if anchor_timestamp.tzinfo is None:
         anchor_timestamp = anchor_timestamp.replace(tzinfo=timezone.utc)
@@ -154,7 +157,8 @@ def resolve_deadline(
     if resolved is None:
         method = "llm_fallback"
         ambiguity = f"Could not deterministically parse: {raw_expression!r}"
-        resolved = _llm_resolve(raw_expression, anchor_timestamp)
+        if allow_llm_fallback:
+            resolved = _llm_resolve(raw_expression, anchor_timestamp)
 
     # Ensure UTC — local_anchor already carries local_tz so its tzinfo is set
     if resolved and resolved.tzinfo is None:

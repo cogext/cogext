@@ -2,7 +2,10 @@
 
 Security:
   - HMAC-SHA256 signature on every delivery (X-COGEXT-Signature header)
-  - Secret stored as bcrypt hash; never exposed in API responses
+  - Secret stored plaintext. Webhook secrets are signing keys — the sender needs
+    the exact value to compute the HMAC, so hashing them would break every
+    delivery. The real fix is encryption at rest with a master key held outside
+    the database. That is a separate change tracked for a later phase.
   - SSRF protection: reject private/loopback IP ranges
   - At-least-once delivery with exponential backoff
 """
@@ -69,11 +72,6 @@ def _sign_payload(secret: str, body: bytes) -> str:
     return hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
 
 
-def _hash_secret(secret: str) -> str:
-    """One-way hash for DB storage (NOT bcrypt — keep it simple and dependency-free)."""
-    return hashlib.sha256(f"cogext:{secret}".encode()).hexdigest()
-
-
 # ---------------------------------------------------------------------------
 # Subscription CRUD
 # ---------------------------------------------------------------------------
@@ -92,6 +90,7 @@ async def create_webhook(body: CreateWebhookRequest) -> WebhookSubscriptionRespo
         "endpoint": body.endpoint,
         "active": True,
         "subscribed_event_types": body.subscribed_event_types,
+        # Plaintext by design — see module docstring.
         "secret_hash": body.secret,  # stored as plaintext; never returned in API responses
         "failure_count": 0,
         "created_at": now,
@@ -143,6 +142,7 @@ async def update_webhook(webhook_id: uuid.UUID, body: UpdateWebhookRequest) -> W
     if body.subscribed_event_types is not None:
         updates["subscribed_event_types"] = body.subscribed_event_types
     if body.secret is not None:
+        # Plaintext by design — see module docstring.
         updates["secret_hash"] = body.secret  # stored as plaintext; never returned in API responses
 
     await sb.table("webhook_subscriptions").update(updates).eq("id", str(webhook_id)).execute()

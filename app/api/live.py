@@ -16,6 +16,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from app.db.connection import get_supabase
+from app.core.live_receipt_verify import verify_live_receipt as _verify
 
 router = APIRouter()
 
@@ -271,3 +272,9 @@ async def get_receipt(receipt_id: str):
     if not row.data:
         raise HTTPException(404, "Receipt not found")
     return row.data[0]
+
+
+@router.get("/receipt/{receipt_id}/verify")
+async def verify_receipt_route(receipt_id: str):
+    receipt = await get_receipt(receipt_id)
+    return {"valid": _verify(receipt)}

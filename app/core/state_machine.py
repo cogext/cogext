@@ -68,6 +68,7 @@ async def transition_commitment(
     sb = get_supabase()
 
     # Evidence gate — block fulfilled for external commitments lacking strong evidence
+    best_score = 0.0
     if target_status == "fulfilled":
         c_resp = await sb.table("commitments").select("shape").eq(
             "id", str(commitment_id)
@@ -95,6 +96,7 @@ async def transition_commitment(
                 "p_actor": actor,
                 "p_data": data or {},
                 "p_idempotency_key": idempotency_key or str(uuid.uuid4()),
+                "p_evidence_score": best_score,
             },
         ).execute()
         if result.data:
