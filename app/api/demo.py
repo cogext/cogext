@@ -8,7 +8,7 @@ router = APIRouter(prefix="/demo", tags=["demo"])
 
 
 class TrackRequest(BaseModel):
-    rawText: str = Field(..., min_length=1, max_length=4000)
+    message: str = Field(..., min_length=1, max_length=4000)
 
 
 class CommitmentObject(BaseModel):
@@ -20,10 +20,19 @@ class CommitmentObject(BaseModel):
     created_at: str
 
 
-_REFUND = re.compile(r"refund\s+(?:of\s+)?\$?([\d,]+(?:\.\d{2})?)", re.I)
+_REFUND = re.compile(r"refund\s+(?:\w+\s+)*?\$([\d,]+(?:\.\d{2})?)", re.I)
 _UPGRADE = re.compile(r"(upgrade|downgrade|scheduled?)\s+(?:to\s+)?(?:tier\s+)?(\w+)", re.I)
-_MIGRATE = re.compile(r"(migrate|snapshot|backup)\s+(?:the\s+)?(?:db|database|cluster)?\s*(\S+)?", re.I)
-_BY_TIME = re.compile(r"by\s+(\d{1,2}(?::\d{2})?\s*(?:am|pm)?|\w+day|tomorrow|EOD|end of (?:day|billing cycle))", re.I)
+_MIGRATE = re.compile(r"(migrate|snapshot|backup)\s+(?:the\s+)?(db|database|cluster)?", re.I)
+_BY_TIME = re.compile(
+    r"(?:by\s+)?("
+    r"end of (?:day|billing cycle)"
+    r"|\d{1,2}(?::\d{2})?\s*(?:am|pm)(?:\s+(?:today|tomorrow))?"
+    r"|\w+day"
+    r"|tomorrow"
+    r"|EOD"
+    r")",
+    re.I,
+)
 
 
 def _extract(raw: str) -> dict:
@@ -60,6 +69,6 @@ def _extract(raw: str) -> dict:
 
 @router.post("/track", response_model=CommitmentObject)
 async def track(payload: TrackRequest):
-    if not payload.rawText.strip():
-        raise HTTPException(status_code=400, detail="rawText is empty")
-    return CommitmentObject(**_extract(payload.rawText))
+    if not payload.message.strip():
+        raise HTTPException(status_code=400, detail="message is empty")
+    return CommitmentObject(**_extract(payload.message))
