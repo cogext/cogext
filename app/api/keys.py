@@ -3,7 +3,6 @@ import logging
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
-from slowapi import _rate_limit_exceeded_handler
 from app.core.rate_limit import limiter
 from pydantic import BaseModel, EmailStr
 
@@ -40,17 +39,20 @@ async def signup(
 
     # Check if email already has a key
     existing = await sb.table("api_keys").select(
-        "key, account_id, email, label"
+        "id"
     ).eq("email", body.email).eq("is_active", True).maybe_single().execute()
 
     if existing and existing.data:
-        row = existing.data
-        return KeyResponse(
-            api_key=row["key"],
-            account_id=row["account_id"],
-            email=row["email"],
-            label=row["label"],
-            message="Existing key returned. Keep it secret.",
+        # Anyone can call this with any email, so returning the stored key here
+        # handed customers' keys to whoever knew their address. Minting a second
+        # key is wrong too: it silently multiplies keys per account. Refuse, and
+        # send the owner to a channel that proves they control the email.
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "An API key already exists for this email and cannot be shown again. "
+                "To recover or rotate it, email hello@cogextai.com from this address."
+            ),
         )
 
     key = generate_api_key()

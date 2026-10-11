@@ -14,7 +14,7 @@ from unittest.mock import Mock
 
 import pytest
 import resend
-from fastapi import BackgroundTasks
+from fastapi import BackgroundTasks, HTTPException
 from starlette.requests import Request
 
 import app.api.keys as keys_module
@@ -384,13 +384,23 @@ async def test_signup_returns_before_notification_runs(monkeypatch, notify_spy):
 
 
 async def test_signup_notifies_once_on_repeat_signup(monkeypatch, notify_spy):
-    """Signing up twice with the same email queues exactly one notification."""
+    """Signing up twice with the same email creates one key, refuses the repeat
+    with 409 without revealing the key, and queues exactly one notification."""
     sb = _FakeSupabase()
     monkeypatch.setattr(keys_module, "get_supabase", lambda: sb)
 
     background_tasks = BackgroundTasks()
+    # A normal return is served as the route's default 200.
     first = await _call_signup("new@example.com", background_tasks)
-    second = await _call_signup("new@example.com", background_tasks)
+    assert first.api_key.startswith("cg_live_")
+
+    with pytest.raises(HTTPException) as exc_info:
+        await _call_signup("new@example.com", background_tasks)
+
+    assert exc_info.value.status_code == 409
+    # The existing key must not leak through the refusal.
+    assert first.api_key not in str(exc_info.value.detail)
+    assert "cg_live_" not in str(exc_info.value.detail)
 
     assert len(background_tasks.tasks) == 1
 
@@ -398,8 +408,7 @@ async def test_signup_notifies_once_on_repeat_signup(monkeypatch, notify_spy):
 
     assert len(notify_spy) == 1
 
-    # Idempotent: the same key comes back, and only one row was ever inserted.
-    assert first.api_key == second.api_key
+    # Idempotent by email: only one row was ever inserted.
     assert len(sb.rows) == 1
 
 
