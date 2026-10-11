@@ -13,12 +13,16 @@ from datetime import datetime, timezone
 from typing import Any
 
 from fastapi import APIRouter, HTTPException
+from postgrest.exceptions import APIError
 from pydantic import BaseModel
 
 from app.db.connection import get_supabase
 from app.core.live_receipt_verify import verify_live_receipt as _verify
 
 router = APIRouter()
+
+# Postgres SQLSTATE for a unique / primary-key violation.
+_PG_UNIQUE_VIOLATION = "23505"
 
 # ---------------------------------------------------------------------------
 # event size guard
@@ -248,18 +252,30 @@ async def square():
 
 @router.post("/receipt")
 async def store_receipt(receipt: Receipt):
+    """Store a new receipt. Receipts are write-once.
+
+    This route is public, so the previous upsert let anyone overwrite any stored
+    receipt by sending its id. A plain insert lets the primary key reject the
+    duplicate atomically, with no check-then-write race. Observers generate a
+    fresh random receipt_id per receipt, so legitimate clients never collide.
+    """
     sb = get_supabase()
-    await sb.table("live_receipts").upsert({
-        "receipt_id": receipt.receipt_id,
-        "session_id": receipt.session_id,
-        "tool": receipt.tool,
-        "tool_response": receipt.tool_response,
-        "agent_claim": receipt.agent_claim,
-        "verdict": receipt.verdict,
-        "reason": receipt.reason,
-        "recorded_at": receipt.recorded_at,
-        "signature": receipt.signature,
-    }).execute()
+    try:
+        await sb.table("live_receipts").insert({
+            "receipt_id": receipt.receipt_id,
+            "session_id": receipt.session_id,
+            "tool": receipt.tool,
+            "tool_response": receipt.tool_response,
+            "agent_claim": receipt.agent_claim,
+            "verdict": receipt.verdict,
+            "reason": receipt.reason,
+            "recorded_at": receipt.recorded_at,
+            "signature": receipt.signature,
+        }).execute()
+    except APIError as e:
+        if e.code == _PG_UNIQUE_VIOLATION:
+            raise HTTPException(409, "receipt_id already exists")
+        raise
     return {"ok": True, "verify_url": receipt.verify_url}
 
 
