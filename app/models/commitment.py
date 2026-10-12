@@ -32,7 +32,7 @@ CommitmentSourceType = Literal[
 ]
 
 VerificationStatus = Literal[
-    "unverified", "pending", "verified", "rejected", "insufficient"
+    "unverified", "pending", "verified", "rejected", "insufficient", "unverifiable"
 ]
 
 ClassificationType = Literal[
