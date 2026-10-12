@@ -1,0 +1,21 @@
+-- ============================================================
+-- 010 — Per-session write token for the public /live/* routes
+--
+-- /live/event and /live/publish are unauthenticated, so until now
+-- anyone who knew (or guessed) a session_id could append events to
+-- it or publish it to the Square.
+--
+-- POST /live/session now returns an opaque token exactly once, at
+-- creation, and stores only its SHA-256 hash here. /live/event and
+-- /live/publish require the token and compare hashes.
+--
+-- Existing rows keep NULL. They are grandfathered: the API answers
+-- 410 for any further write to them. Sessions already published stay
+-- on the Square. Falling back to id-only writes for NULL rows would
+-- reopen the hole, so there is no such fallback.
+--
+-- The column must never be returned by a public read; the API selects
+-- explicit columns on every live_sessions read.
+-- ============================================================
+
+ALTER TABLE live_sessions ADD COLUMN IF NOT EXISTS session_token_hash TEXT;

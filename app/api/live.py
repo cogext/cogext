@@ -8,7 +8,9 @@ Vendor names are stripped on the read path, never on write. The stored
 session always keeps exactly what the caller sent, so publishing never
 rewrites the events column and the raw record stays auditable.
 """
+import hashlib
 import json
+import secrets
 from datetime import datetime, timezone
 from typing import Any
 
@@ -100,10 +102,37 @@ class SessionCreate(BaseModel):
 class EventLog(BaseModel):
     session_id: str
     event: dict
+    # Optional at the schema level so a missing token reaches the handler and
+    # gets the same 403 as a wrong one, instead of a 422.
+    publish_token: str | None = None
 
 
 class PublishRequest(BaseModel):
     session_id: str
+    publish_token: str | None = None
+
+
+def _hash_token(token: str) -> str:
+    return hashlib.sha256(token.encode()).hexdigest()
+
+
+async def _require_session_token(sb, session_id: str, token: str | None) -> None:
+    """Prove the caller created this session. Shared by /event and /publish.
+
+    The token is issued once by POST /session and only its hash is stored.
+    Sessions created before tokens existed have no hash and are closed to
+    writes; accepting id-only writes for them would reopen the hole.
+    """
+    row = await sb.table("live_sessions").select("session_token_hash").eq(
+        "session_id", session_id
+    ).execute()
+    if not row.data:
+        raise HTTPException(404, "Session not found")
+    stored = row.data[0].get("session_token_hash")
+    if not stored:
+        raise HTTPException(410, "Session predates session tokens and no longer accepts writes")
+    if not token or not secrets.compare_digest(stored, _hash_token(token)):
+        raise HTTPException(403, "Invalid publish token")
 
 
 class Receipt(BaseModel):
@@ -147,27 +176,40 @@ def _strip_vendors(value: Any) -> Any:
 
 @router.post("/session")
 async def create_session(body: SessionCreate):
-    """Idempotent session create. The observer calls this before its first tool."""
+    """Create a session and return its publish token, exactly once.
+
+    The token is shown only to whoever creates the row, and only its hash is
+    stored. An existing session_id gets 409 and no token: returning one there
+    would let anyone claim a session by calling this with its id. The insert
+    lets the primary key reject duplicates atomically.
+    """
     sb = get_supabase()
-    existing = await sb.table("live_sessions").select("session_id").eq(
-        "session_id", body.session_id
-    ).execute()
+    token = secrets.token_urlsafe(32)
     created_at = datetime.now(timezone.utc).isoformat()
-    if not existing.data:
+    try:
         await sb.table("live_sessions").insert({
             "session_id": body.session_id,
             "created_at": created_at,
+            "session_token_hash": _hash_token(token),
         }).execute()
-    return {"session_id": body.session_id, "created_at": created_at}
+    except APIError as e:
+        if e.code == _PG_UNIQUE_VIOLATION:
+            raise HTTPException(409, "session_id already exists")
+        raise
+    return {"session_id": body.session_id, "created_at": created_at, "publish_token": token}
 
 
 @router.post("/event")
 async def log_event(body: EventLog):
-    """Append one event. Creates the session on first write.
+    """Append one event to a session the caller owns.
 
-    The append happens inside the live_append_event SQL function so two
-    in-flight tool calls from the same observer cannot overwrite each other.
+    The session must already exist (POST /session) and the caller must hold
+    its token. The append happens inside the live_append_event SQL function so
+    two in-flight tool calls from the same observer cannot overwrite each other.
     """
+    sb = get_supabase()
+    await _require_session_token(sb, body.session_id, body.publish_token)
+
     # Guard against oversized events.
     event_str = json.dumps(body.event)
     if len(event_str) > MAX_EVENT_BYTES:
@@ -177,7 +219,6 @@ async def log_event(body: EventLog):
     # long string.
     body.event = _bound_event(body.event)
 
-    sb = get_supabase()
     await sb.rpc("live_append_event", {
         "p_session_id": body.session_id,
         "p_event": body.event,
@@ -188,7 +229,10 @@ async def log_event(body: EventLog):
 @router.get("/session/{session_id}")
 async def get_session(session_id: str):
     sb = get_supabase()
-    row = await sb.table("live_sessions").select("*").eq(
+    # Explicit columns: "*" would expose session_token_hash on a public route.
+    row = await sb.table("live_sessions").select(
+        "session_id,created_at,events,published,published_at"
+    ).eq(
         "session_id", session_id
     ).execute()
     if not row.data:
@@ -211,11 +255,7 @@ async def publish(body: PublishRequest):
     events. Vendor names are removed on the read path instead.
     """
     sb = get_supabase()
-    row = await sb.table("live_sessions").select("session_id").eq(
-        "session_id", body.session_id
-    ).execute()
-    if not row.data:
-        raise HTTPException(404, "Session not found")
+    await _require_session_token(sb, body.session_id, body.publish_token)
 
     await sb.table("live_sessions").update(
         {
