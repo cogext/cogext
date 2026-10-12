@@ -28,6 +28,30 @@ def test_source_agent_id() -> uuid.UUID:
     return TEST_SOURCE_AGENT_ID
 
 
+@pytest.fixture
+def auth_override():
+    """Bypass API-key auth for validation-only tests.
+
+    Protected routers are mounted with `Depends(get_current_account)` in
+    app/main.py, which raises 401 *before* request validation runs. Tests that
+    assert on 422 responses must therefore authenticate first. No DB hit is
+    needed because the real dependency is replaced outright.
+    """
+    from app.core.auth import Account, get_current_account
+    from app.main import app
+
+    def _fake_account() -> Account:
+        return Account(
+            account_id=str(TEST_USER_ID),
+            email="test@example.com",
+            key_id=str(TEST_USER_ID),
+        )
+
+    app.dependency_overrides[get_current_account] = _fake_account
+    yield
+    app.dependency_overrides.pop(get_current_account, None)
+
+
 @pytest_asyncio.fixture
 async def test_client():
     async with LifespanManager(app) as manager:

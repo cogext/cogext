@@ -118,7 +118,7 @@ async def test_patch_returns_404_for_unknown_id(test_client, clean_db):
 
 
 @pytest.mark.asyncio
-async def test_patch_rejects_invalid_status(test_client):
+async def test_patch_rejects_invalid_status(test_client, auth_override):
     resp = await test_client.patch(
         f"/api/v1/commitments/{uuid.uuid4()}",
         json={"status": "deleted"},

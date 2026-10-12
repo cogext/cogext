@@ -122,6 +122,12 @@ async def test_recall_empty_for_unknown_user(test_client, clean_db):
 
 
 @pytest.mark.asyncio
-async def test_recall_requires_user_id(test_client):
+async def test_recall_requires_auth(test_client):
+    """user_id is derived from the API key — there is no user_id parameter.
+
+    Superseded the old "missing user_id -> 422" expectation: recall.py:37
+    scopes the query with account.account_id, so the real requirement is
+    authentication. Unauthenticated calls must be rejected before any query.
+    """
     resp = await test_client.get(_RECALL_URL)
-    assert resp.status_code == 422
+    assert resp.status_code == 401

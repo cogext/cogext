@@ -60,7 +60,7 @@ async def test_ingest_is_idempotent(test_client, clean_db):
 
 
 @pytest.mark.asyncio
-async def test_ingest_rejects_invalid_uuid(test_client):
+async def test_ingest_rejects_invalid_uuid(test_client, auth_override):
     body = {**_VALID_BODY, "user_id": "not-a-uuid"}
     resp = await test_client.post(_INGEST_URL, json=body)
     assert resp.status_code == 422
@@ -77,7 +77,7 @@ async def test_ingest_rejects_malformed_json(test_client):
 
 
 @pytest.mark.asyncio
-async def test_ingest_rejects_missing_message(test_client):
+async def test_ingest_rejects_missing_message(test_client, auth_override):
     body = {"user_id": str(TEST_USER_ID), "source_agent_id": str(TEST_SOURCE_AGENT_ID)}
     resp = await test_client.post(_INGEST_URL, json=body)
     assert resp.status_code == 422
