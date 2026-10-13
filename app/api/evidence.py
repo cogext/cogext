@@ -4,9 +4,11 @@ import logging
 import uuid
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 
+from app.core.auth import Account, get_current_account
 from app.core.evidence_aggregator import aggregate_evidence, score_evidence_against_commitment
+from app.core.ownership import get_owned_commitment
 from app.db.connection import get_supabase
 from app.models.evidence import Evidence, EvidenceAggregation, SubmitEvidenceRequest
 
@@ -32,17 +34,14 @@ def _map_strength(score: float) -> str:
 async def submit_evidence(
     commitment_id: uuid.UUID,
     body: SubmitEvidenceRequest,
+    account: Account = Depends(get_current_account),
 ) -> Evidence:
     sb = get_supabase()
 
-    # Verify commitment exists and get fields for scoring
-    c_resp = await sb.table("commitments").select(
-        "id, action, object, recipient, due_condition, status"
-    ).eq("id", str(commitment_id)).execute()
-    if not c_resp.data:
-        raise HTTPException(status_code=404, detail="Commitment not found")
-
-    c_row = c_resp.data[0]
+    # The caller must own the commitment (404 otherwise); get fields for scoring
+    c_row = await get_owned_commitment(
+        sb, commitment_id, account, "id, action, object, recipient, due_condition, status"
+    )
     due_cond = c_row.get("due_condition") or {}
     commitment_deadline = due_cond.get("deadline")
 
@@ -57,11 +56,14 @@ async def submit_evidence(
 
     strength = _map_strength(score)
 
-    # Idempotency key for external evidence
+    # Idempotency key for external evidence, namespaced by account:
+    # evidence.idempotency_key is UNIQUE across the whole table. Migration 012
+    # drops the global (external_system, external_event_id) index and re-keys
+    # existing rows with this same format; keep the two in step.
     idem_key = None
     if body.external_system and body.external_event_id:
         idem_key = hashlib.sha256(
-            f"{body.external_system}:{body.external_event_id}".encode()
+            f"{account.account_id}:{body.external_system}:{body.external_event_id}".encode()
         ).hexdigest()
 
     now = datetime.now(timezone.utc).isoformat()
@@ -141,8 +143,11 @@ async def submit_evidence(
 async def get_evidence(
     commitment_id: uuid.UUID,
     limit: int = Query(default=50, ge=1, le=200),
+    account: Account = Depends(get_current_account),
 ) -> list[Evidence]:
     sb = get_supabase()
+    # Evidence belongs to its commitment; the caller must own it (404 otherwise)
+    await get_owned_commitment(sb, commitment_id, account, "id")
     resp = await sb.table("evidence").select("*").eq(
         "commitment_id", str(commitment_id)
     ).order("occurred_at", desc=False).limit(limit).execute()
@@ -150,8 +155,13 @@ async def get_evidence(
 
 
 @router.get("/commitments/{commitment_id}/evidence/aggregate", response_model=EvidenceAggregation)
-async def get_evidence_aggregate(commitment_id: uuid.UUID) -> EvidenceAggregation:
+async def get_evidence_aggregate(
+    commitment_id: uuid.UUID,
+    account: Account = Depends(get_current_account),
+) -> EvidenceAggregation:
     sb = get_supabase()
+    # Evidence belongs to its commitment; the caller must own it (404 otherwise)
+    await get_owned_commitment(sb, commitment_id, account, "id")
     resp = await sb.table("evidence").select("*").eq(
         "commitment_id", str(commitment_id)
     ).execute()
@@ -160,6 +170,9 @@ async def get_evidence_aggregate(commitment_id: uuid.UUID) -> EvidenceAggregatio
 
 
 @router.post("/evidence/external", response_model=Evidence)
-async def submit_external_evidence(body: SubmitEvidenceRequest) -> Evidence:
+async def submit_external_evidence(
+    body: SubmitEvidenceRequest,
+    account: Account = Depends(get_current_account),
+) -> Evidence:
     """Submit evidence from an external system adapter."""
-    return await submit_evidence(body.commitment_id, body)
+    return await submit_evidence(body.commitment_id, body, account)

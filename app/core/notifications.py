@@ -12,38 +12,58 @@ from __future__ import annotations
 
 import hashlib
 import hmac
-import json
 import logging
 import time
 from typing import Any
 
 import httpx
 
+from app.core.signing_keys import usable_signing_key
 from config import settings
 
 logger = logging.getLogger(__name__)
 
 _BASE_URL = "https://api.cogextai.com/api/v1"
-_SECRET = (settings.ACTION_TOKEN_SECRET or "cogext-action-secret-change-me").encode()
+
+
+class ActionTokenUnavailable(RuntimeError):
+    """ACTION_TOKEN_SECRET is missing, too short or publicly known."""
 
 
 # ── Token helpers ────────────────────────────────────────────────────────────
 
-def _make_action_token(review_id: str, action: str, expires_at: int) -> str:
+def _secret() -> bytes | None:
+    # No fallback: the old fallback string is public, so tokens signed with it
+    # could be forged by any caller. Read at call time so a configuration
+    # change applies.
+    key = usable_signing_key(settings.ACTION_TOKEN_SECRET)
+    return key.encode() if key else None
+
+
+def _make_action_token(secret: bytes, review_id: str, action: str, expires_at: int) -> str:
     """HMAC-SHA256 token: review_id|action|expires_at → hex digest (64 chars)."""
     payload = f"{review_id}|{action}|{expires_at}"
-    return hmac.new(_SECRET, payload.encode(), hashlib.sha256).hexdigest()
+    return hmac.new(secret, payload.encode(), hashlib.sha256).hexdigest()
 
 
 def generate_action_token(review_id: str, action: str, ttl_seconds: int = 86400) -> str:
-    """Return a signed token valid for *ttl_seconds*."""
+    """Return a signed token valid for *ttl_seconds*.
+
+    Raises ActionTokenUnavailable when no usable secret is configured.
+    """
+    secret = _secret()
+    if secret is None:
+        raise ActionTokenUnavailable("ACTION_TOKEN_SECRET is not configured for action tokens")
     expires_at = int(time.time()) + ttl_seconds
-    sig = _make_action_token(review_id, action, expires_at)
+    sig = _make_action_token(secret, review_id, action, expires_at)
     return f"{expires_at}.{sig}"
 
 
 def verify_action_token(token: str, review_id: str, action: str) -> bool:
-    """Validate a token from query params. Timing-safe."""
+    """Validate a token from query params. Timing-safe. False without a usable secret."""
+    secret = _secret()
+    if secret is None:
+        return False
     try:
         expires_str, sig = token.split(".", 1)
         expires_at = int(expires_str)
@@ -51,8 +71,8 @@ def verify_action_token(token: str, review_id: str, action: str) -> bool:
         return False
     if int(time.time()) > expires_at:
         return False
-    expected = _make_action_token(review_id, action, expires_at)
-    return hmac.compare_digest(sig, expected)
+    expected = _make_action_token(secret, review_id, action, expires_at)
+    return hmac.compare_digest(sig.encode(), expected.encode())
 
 
 # ── Slack Block Kit builder ──────────────────────────────────────────────────
@@ -74,7 +94,7 @@ def build_kill_switch_blocks(
     risk_pct = f"{round((risk_score or 0) * 100)}%" if risk_score else "N/A"
     reasons_text = " • ".join(risk_reasons or ["unspecified"]) if risk_reasons else "N/A"
 
-    return [
+    blocks = [
         {
             "type": "header",
             "text": {"type": "plain_text", "text": "⚠️ COGEXT — High-Risk Commitment Flagged"},
@@ -100,6 +120,16 @@ def build_kill_switch_blocks(
             "text": {"type": "mrkdwn", "text": f"*Risk Reasons:*\n{reasons_text}"},
         },
         {"type": "divider"},
+    ]
+    try:
+        approve_url = _action_url(review_id, "approve")
+        cancel_url = _action_url(review_id, "cancel")
+    except ActionTokenUnavailable:
+        # Still alert, but without one-click links that could not be trusted.
+        logger.warning("ACTION_TOKEN_SECRET is missing, too short or publicly known; "
+                       "kill switch alert sent without action buttons")
+        return blocks
+    blocks.append(
         {
             "type": "actions",
             "elements": [
@@ -107,17 +137,18 @@ def build_kill_switch_blocks(
                     "type": "button",
                     "text": {"type": "plain_text", "text": "✅ Approve"},
                     "style": "primary",
-                    "url": _action_url(review_id, "approve"),
+                    "url": approve_url,
                 },
                 {
                     "type": "button",
                     "text": {"type": "plain_text", "text": "🛑 Cancel"},
                     "style": "danger",
-                    "url": _action_url(review_id, "cancel"),
+                    "url": cancel_url,
                 },
             ],
-        },
-    ]
+        }
+    )
+    return blocks
 
 
 async def send_kill_switch_alert(

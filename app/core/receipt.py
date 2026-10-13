@@ -13,19 +13,28 @@ import hashlib
 import hmac
 import logging
 import secrets
-from datetime import datetime, timezone
 
+from app.core.signing_keys import usable_signing_key
 from config import settings
 
 logger = logging.getLogger(__name__)
 
-_SECRET = settings.ACTION_TOKEN_SECRET or "cogext-receipt-secret-change-me"
+
+class ReceiptSigningUnavailable(RuntimeError):
+    """ACTION_TOKEN_SECRET is missing, too short or publicly known."""
 
 
-def _sign(commitment_id: str, user_id: str, promise_text: str, created_at: str) -> str:
+def _secret() -> bytes | None:
+    # No fallback: the old fallback string is public, so tokens signed with it
+    # could be forged. Read at call time so a configuration change applies.
+    key = usable_signing_key(settings.ACTION_TOKEN_SECRET)
+    return key.encode() if key else None
+
+
+def _sign(secret: bytes, commitment_id: str, user_id: str, promise_text: str, created_at: str) -> str:
     """HMAC-SHA256 over stable commitment fields → URL-safe base64 (43 chars)."""
     payload = f"{commitment_id}|{user_id}|{promise_text}|{created_at}"
-    sig = hmac.new(_SECRET.encode(), payload.encode(), hashlib.sha256).digest()
+    sig = hmac.new(secret, payload.encode(), hashlib.sha256).digest()
     return base64.urlsafe_b64encode(sig).rstrip(b"=").decode()
 
 
@@ -39,9 +48,13 @@ def generate_receipt_token(
 
     Format: <8-char random prefix>.<HMAC-SHA256 of stable fields>
     The random prefix makes tokens unguessable even if an attacker knows the HMAC key.
+    Raises ReceiptSigningUnavailable when no usable secret is configured.
     """
+    secret = _secret()
+    if secret is None:
+        raise ReceiptSigningUnavailable("ACTION_TOKEN_SECRET is not configured for receipt signing")
     prefix = secrets.token_urlsafe(6)  # 8 base64 chars
-    sig = _sign(commitment_id, user_id, promise_text, created_at)
+    sig = _sign(secret, commitment_id, user_id, promise_text, created_at)
     return f"{prefix}.{sig}"
 
 
@@ -52,10 +65,13 @@ def verify_receipt_token(
     promise_text: str,
     created_at: str,
 ) -> bool:
-    """Verify *token* against commitment fields. Timing-safe."""
+    """Verify *token* against commitment fields. Timing-safe. False without a usable secret."""
+    secret = _secret()
+    if secret is None:
+        return False
     try:
         _, sig = token.split(".", 1)
     except ValueError:
         return False
-    expected = _sign(commitment_id, user_id, promise_text, created_at)
-    return hmac.compare_digest(sig, expected)
+    expected = _sign(secret, commitment_id, user_id, promise_text, created_at)
+    return hmac.compare_digest(sig.encode(), expected.encode())

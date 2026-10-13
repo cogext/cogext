@@ -3,7 +3,26 @@ from datetime import datetime
 from typing import Any, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+
+# Fields a refinement may change: the content of the promise, matching the
+# ChangeType values below. Everything else is identity, ownership, lifecycle,
+# verification or audit state (user_id, status, receipt_token, id,
+# idempotency_key, created_at, shape, verifier_query, superseded_by, ...).
+# Status moves only through the state machine; supersession only through
+# ApplyRefinementRequest.supersedes.
+REFINABLE_FIELDS = frozenset({
+    "promise_text",
+    "action",
+    "object",
+    "recipient",
+    "deadline",
+    "deadline_type",
+    "deadline_expression",
+    "due_condition",
+    "conditions",
+    "priority",
+})
 
 ChangeType = Literal[
     "supersedes",
@@ -35,6 +54,22 @@ class ApplyRefinementRequest(BaseModel):
     changes: list[dict[str, Any]]      # [{field, new_value, change_type, reason}]
     actor: str
     supersedes: UUID | None = None  # UUID of the commitment this one supersedes
+
+    @field_validator("changes")
+    @classmethod
+    def _only_refinable_fields(cls, changes: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        # A change with no field is skipped by the handler, as before.
+        rejected = [
+            ch.get("field") for ch in changes
+            if ch.get("field") not in (None, "")
+            and not (isinstance(ch.get("field"), str) and ch.get("field") in REFINABLE_FIELDS)
+        ]
+        if rejected:
+            raise ValueError(
+                f"field(s) {rejected!r} cannot be changed by a refinement; "
+                f"allowed: {sorted(REFINABLE_FIELDS)}"
+            )
+        return changes
 
 
 class RefinementHistory(BaseModel):

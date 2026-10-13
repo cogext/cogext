@@ -2,10 +2,13 @@
 import logging
 import uuid
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
+from app.core.auth import Account, get_current_account
+from app.core.ownership import get_owned_commitment
 from app.core.privacy import redact_commitment, redact_text
+from app.db.connection import get_supabase
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -16,7 +19,12 @@ class RedactRequest(BaseModel):
 
 
 @router.post("/commitments/{commitment_id}/redact")
-async def redact_commitment_endpoint(commitment_id: uuid.UUID) -> dict:
+async def redact_commitment_endpoint(
+    commitment_id: uuid.UUID,
+    account: Account = Depends(get_current_account),
+) -> dict:
+    # The caller must own the commitment (404 otherwise) before it is rewritten.
+    await get_owned_commitment(get_supabase(), commitment_id, account, "id")
     try:
         return await redact_commitment(str(commitment_id))
     except ValueError as e:

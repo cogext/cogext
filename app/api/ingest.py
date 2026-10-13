@@ -81,9 +81,12 @@ async def ingest(body: IngestRequest, account: Account = Depends(get_current_acc
     # Override idempotency keys to include raw message text so that semantically
     # distinct messages (same intent, different deadline) always create separate rows,
     # regardless of whether the LLM extracted deadline_expression or not.
+    # The key starts with the account: commitments.idempotency_key is UNIQUE across
+    # the whole table, so without it one account's message could suppress another's.
     _hour = now_dt.replace(minute=0, second=0, microsecond=0, tzinfo=timezone.utc)
     for c in commitments:
         _payload = (
+            f"{user_id}|"
             f"{body.source_agent_id}"
             f"|{body.message.strip().lower()}"
             f"|{c.promise_text.strip().lower()}"
@@ -135,7 +138,8 @@ async def ingest(body: IngestRequest, account: Account = Depends(get_current_acc
                 commitment_to_save = c
             else:
                 existing = await sb.table("commitments").select("*") \
-                    .eq("idempotency_key", c.idempotency_key).maybe_single().execute()
+                    .eq("idempotency_key", c.idempotency_key) \
+                    .eq("user_id", str(user_id)).maybe_single().execute()
                 if existing and existing.data:
                     commitment_to_save = Commitment(**existing.data)
                 else:
@@ -183,6 +187,7 @@ async def ingest(body: IngestRequest, account: Account = Depends(get_current_acc
                                 "user_id": str(user_id),
                                 "agent_id": str(body.source_agent_id),
                             },
+                            account_id=str(user_id),
                         )
                 except Exception as cd_err:
                     logger.warning("Contradiction detection failed cid=%s: %s", commitment_to_save.id, cd_err)
@@ -210,6 +215,7 @@ async def ingest(body: IngestRequest, account: Account = Depends(get_current_acc
                                 "user_id": str(user_id),
                                 "agent_id": str(body.source_agent_id),
                             },
+                            account_id=str(user_id),
                         )
                 except Exception as rs_err:
                     logger.warning("Risk scoring failed cid=%s: %s", commitment_to_save.id, rs_err)

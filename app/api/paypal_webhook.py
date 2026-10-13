@@ -1,8 +1,7 @@
 """PayPal payment webhook → auto-provision COGEXT account + send welcome email."""
+import json
 import logging
 import os
-import secrets
-import string
 
 import httpx
 import resend
@@ -16,36 +15,88 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 PAYPAL_WEBHOOK_ID = os.getenv("PAYPAL_WEBHOOK_ID", "7W1092740M6082718")
+PAYPAL_API_BASE = "https://api-m.paypal.com"
+
+# Every PayPal webhook delivery carries these; all are inputs to PayPal's
+# verify-webhook-signature API. A request missing any of them is not genuine.
+_REQUIRED_HEADERS = (
+    "paypal-auth-algo",
+    "paypal-cert-url",
+    "paypal-transmission-id",
+    "paypal-transmission-sig",
+    "paypal-transmission-time",
+)
 RESEND_API_KEY = os.getenv("RESEND_API_KEY", "")
 FROM_EMAIL = "hello@cogextai.com"
 
 resend.api_key = RESEND_API_KEY
 
 
-async def _verify_paypal_webhook(request: Request, body: bytes) -> bool:
-    """Verify PayPal webhook signature via PayPal API."""
+class _VerificationUnavailable(Exception):
+    """PayPal could not be asked, or did not give a usable answer."""
+
+
+def _webhook_id() -> str:
+    return PAYPAL_WEBHOOK_ID
+
+
+async def _verify_paypal_webhook(headers, event: dict) -> bool:
+    """Ask PayPal whether this delivery is authentic.
+
+    Follows PayPal's verify-webhook-signature flow: obtain an OAuth access
+    token with the REST app credentials, then POST the five transmission
+    headers, the webhook id and the event to
+    /v1/notifications/verify-webhook-signature.
+
+    Returns True only for verification_status "SUCCESS", False for "FAILURE".
+    Raises _VerificationUnavailable when verification cannot be performed
+    (credentials missing, PayPal error, unexpected response); the caller must
+    reject the request in that case too.
+    """
+    client_id = os.getenv("PAYPAL_CLIENT_ID", "")
+    client_secret = os.getenv("PAYPAL_CLIENT_SECRET", "")
+    if not client_id or not client_secret:
+        raise _VerificationUnavailable("PAYPAL_CLIENT_ID / PAYPAL_CLIENT_SECRET are not configured")
+
     try:
-        headers = request.headers
-        payload = {
-            "auth_algo": headers.get("paypal-auth-algo"),
-            "cert_url": headers.get("paypal-cert-url"),
-            "transmission_id": headers.get("paypal-transmission-id"),
-            "transmission_sig": headers.get("paypal-transmission-sig"),
-            "transmission_time": headers.get("paypal-transmission-time"),
-            "webhook_id": PAYPAL_WEBHOOK_ID,
-            "webhook_event": body.decode("utf-8"),
-        }
-        async with httpx.AsyncClient() as client:
-            resp = await client.post(
-                "https://api-m.paypal.com/v1/notifications/verify-webhook-signature",
-                json=payload,
-                timeout=10,
+        async with httpx.AsyncClient(timeout=10) as client:
+            token_resp = await client.post(
+                f"{PAYPAL_API_BASE}/v1/oauth2/token",
+                data={"grant_type": "client_credentials"},
+                auth=(client_id, client_secret),
+                headers={"Accept": "application/json"},
             )
-            data = resp.json()
-            return data.get("verification_status") == "SUCCESS"
+            if token_resp.status_code != 200:
+                raise _VerificationUnavailable(f"OAuth token request returned HTTP {token_resp.status_code}")
+            access_token = token_resp.json().get("access_token")
+            if not access_token:
+                raise _VerificationUnavailable("OAuth token response had no access_token")
+
+            resp = await client.post(
+                f"{PAYPAL_API_BASE}/v1/notifications/verify-webhook-signature",
+                json={
+                    "auth_algo": headers.get("paypal-auth-algo"),
+                    "cert_url": headers.get("paypal-cert-url"),
+                    "transmission_id": headers.get("paypal-transmission-id"),
+                    "transmission_sig": headers.get("paypal-transmission-sig"),
+                    "transmission_time": headers.get("paypal-transmission-time"),
+                    "webhook_id": _webhook_id(),
+                    "webhook_event": event,
+                },
+                headers={"Authorization": f"Bearer {access_token}"},
+            )
+            if resp.status_code != 200:
+                raise _VerificationUnavailable(f"verify-webhook-signature returned HTTP {resp.status_code}")
+            status = resp.json().get("verification_status")
+    except _VerificationUnavailable:
+        raise
     except Exception as e:
-        logger.warning("PayPal webhook verification failed: %s", e)
-        return False
+        # Type only: messages from HTTP clients can include request details.
+        raise _VerificationUnavailable(f"PayPal verification request failed: {type(e).__name__}") from None
+
+    if status not in ("SUCCESS", "FAILURE"):
+        raise _VerificationUnavailable("verify-webhook-signature gave no usable verification_status")
+    return status == "SUCCESS"
 
 
 async def _provision_account(email: str, plan: str = "scale") -> dict:
@@ -128,18 +179,28 @@ async def paypal_webhook(request: Request) -> JSONResponse:
     """Receive PayPal payment.sale.completed → provision account → send API key."""
     body = await request.body()
 
-    # Verify signature (skip in dev if headers missing)
-    if request.headers.get("paypal-transmission-id"):
-        verified = await _verify_paypal_webhook(request, body)
-        if not verified:
-            logger.warning("PayPal webhook signature verification failed")
-            raise HTTPException(status_code=400, detail="Invalid webhook signature")
+    # Every request must carry all PayPal transmission headers and be confirmed
+    # by PayPal before anything is provisioned. No header-presence shortcut.
+    missing = [h for h in _REQUIRED_HEADERS if not request.headers.get(h)]
+    if missing:
+        logger.warning("PayPal webhook rejected: missing headers %s", missing)
+        raise HTTPException(status_code=400, detail=f"Missing PayPal signature headers: {', '.join(missing)}")
 
-    import json
     try:
         event = json.loads(body)
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid JSON")
+    if not isinstance(event, dict):
+        raise HTTPException(status_code=400, detail="Invalid JSON")
+
+    try:
+        verified = await _verify_paypal_webhook(request.headers, event)
+    except _VerificationUnavailable as e:
+        logger.error("PayPal webhook verification unavailable: %s", e)
+        raise HTTPException(status_code=503, detail="Webhook verification unavailable")
+    if not verified:
+        logger.warning("PayPal webhook signature verification failed")
+        raise HTTPException(status_code=400, detail="Invalid webhook signature")
 
     event_type = event.get("event_type", "")
     logger.info("PayPal webhook received: %s", event_type)

@@ -6,8 +6,10 @@ import logging
 import uuid
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 
+from app.core.auth import Account, get_current_account
+from app.core.ownership import get_owned_commitment
 from app.core.state_machine import transition_commitment
 from app.db.connection import get_supabase
 from app.core.notifications import send_kill_switch_alert, verify_action_token
@@ -31,6 +33,21 @@ async def _get_review(sb, review_id: str) -> dict:
     return resp.data[0]
 
 
+async def _get_owned_review(sb, review_id: str, account: Account) -> dict:
+    """Return the review if the caller owns its commitment, else 404.
+
+    Access to a review follows ownership of its commitment. reviewer_id is a
+    free-form label with no link to an account, so it grants nothing. Another
+    account's review gets the same 404 as a missing one.
+    """
+    row = await _get_review(sb, review_id)
+    try:
+        await get_owned_commitment(sb, row["commitment_id"], account, "id")
+    except HTTPException:
+        raise HTTPException(status_code=404, detail="Review not found") from None
+    return row
+
+
 async def _insert_event(sb, commitment_id: str, event_type: str, actor: str, data: dict):
     now = datetime.now(timezone.utc).isoformat()
     try:
@@ -48,15 +65,17 @@ async def _insert_event(sb, commitment_id: str, event_type: str, actor: str, dat
 
 
 @router.post("/reviews", response_model=HumanReview)
-async def create_review(body: CreateReviewRequest) -> HumanReview:
+async def create_review(
+    body: CreateReviewRequest,
+    account: Account = Depends(get_current_account),
+) -> HumanReview:
     sb = get_supabase()
 
-    # Verify commitment exists
-    c_resp = await sb.table("commitments").select("id, status, promise_text, risk_score, risk_reasons, source_agent_id").eq(
-        "id", str(body.commitment_id)
-    ).execute()
-    if not c_resp.data:
-        raise HTTPException(status_code=404, detail="Commitment not found")
+    # The caller must own the commitment (404 otherwise)
+    c_row = await get_owned_commitment(
+        sb, body.commitment_id, account,
+        "id, status, promise_text, risk_score, risk_reasons, source_agent_id",
+    )
 
     now = datetime.now(timezone.utc).isoformat()
     rev_id = uuid.uuid4()
@@ -73,7 +92,7 @@ async def create_review(body: CreateReviewRequest) -> HumanReview:
     }).execute()
 
     # Transition commitment to pending_review if currently open/detected
-    current = c_resp.data[0]["status"]
+    current = c_row["status"]
     if current == "detected":  # only detected→pending_review is a valid transition
         try:
             await transition_commitment(
@@ -89,7 +108,6 @@ async def create_review(body: CreateReviewRequest) -> HumanReview:
 
     # ── Kill Switch: Slack alert ──────────────────────────────────────
     try:
-        c_row = c_resp.data[0]
         risk_score = c_row.get("risk_score")
         risk_reasons = c_row.get("risk_reasons") or []
         await send_kill_switch_alert(
@@ -110,9 +128,12 @@ async def create_review(body: CreateReviewRequest) -> HumanReview:
 
 
 @router.get("/reviews/{review_id}", response_model=HumanReview)
-async def get_review(review_id: uuid.UUID) -> HumanReview:
+async def get_review(
+    review_id: uuid.UUID,
+    account: Account = Depends(get_current_account),
+) -> HumanReview:
     sb = get_supabase()
-    row = await _get_review(sb, str(review_id))
+    row = await _get_owned_review(sb, str(review_id), account)
     return HumanReview.model_validate(row)
 
 
@@ -121,11 +142,18 @@ async def list_reviews(
     commitment_id: uuid.UUID | None = None,
     status: str | None = None,
     limit: int = Query(default=50, ge=1, le=200),
+    account: Account = Depends(get_current_account),
 ) -> list[HumanReview]:
     sb = get_supabase()
-    q = sb.table("human_reviews").select("*").limit(limit)
+    # Only reviews of the caller's own commitments. A commitment_id filter for
+    # another account's commitment returns [], the same as a missing one.
+    owned = await sb.table("commitments").select("id").eq("user_id", account.account_id).execute()
+    owned_ids = [r["id"] for r in (owned.data or [])]
     if commitment_id:
-        q = q.eq("commitment_id", str(commitment_id))
+        owned_ids = [i for i in owned_ids if str(i) == str(commitment_id)]
+    if not owned_ids:
+        return []
+    q = sb.table("human_reviews").select("*").in_("commitment_id", owned_ids).limit(limit)
     if status:
         q = q.eq("status", status)
     resp = await q.order("created_at", desc=True).execute()
@@ -133,9 +161,13 @@ async def list_reviews(
 
 
 @router.post("/reviews/{review_id}/assign", response_model=HumanReview)
-async def assign_review(review_id: uuid.UUID, body: AssignReviewRequest) -> HumanReview:
+async def assign_review(
+    review_id: uuid.UUID,
+    body: AssignReviewRequest,
+    account: Account = Depends(get_current_account),
+) -> HumanReview:
     sb = get_supabase()
-    row = await _get_review(sb, str(review_id))
+    row = await _get_owned_review(sb, str(review_id), account)
     if row["status"] != "pending":
         raise HTTPException(status_code=409, detail="Review is not in pending state")
     now = datetime.now(timezone.utc).isoformat()
@@ -151,9 +183,13 @@ async def assign_review(review_id: uuid.UUID, body: AssignReviewRequest) -> Huma
 
 
 @router.post("/reviews/{review_id}/accept", response_model=HumanReview)
-async def accept_review(review_id: uuid.UUID, body: AcceptReviewRequest) -> HumanReview:
+async def accept_review(
+    review_id: uuid.UUID,
+    body: AcceptReviewRequest,
+    account: Account = Depends(get_current_account),
+) -> HumanReview:
     sb = get_supabase()
-    row = await _get_review(sb, str(review_id))
+    row = await _get_owned_review(sb, str(review_id), account)
     if row["status"] not in {"pending", "assigned"}:
         raise HTTPException(status_code=409, detail="Review cannot be accepted in its current state")
     now = datetime.now(timezone.utc).isoformat()
@@ -182,9 +218,13 @@ async def accept_review(review_id: uuid.UUID, body: AcceptReviewRequest) -> Huma
 
 
 @router.post("/reviews/{review_id}/reject", response_model=HumanReview)
-async def reject_review(review_id: uuid.UUID, body: RejectReviewRequest) -> HumanReview:
+async def reject_review(
+    review_id: uuid.UUID,
+    body: RejectReviewRequest,
+    account: Account = Depends(get_current_account),
+) -> HumanReview:
     sb = get_supabase()
-    row = await _get_review(sb, str(review_id))
+    row = await _get_owned_review(sb, str(review_id), account)
     if row["status"] not in {"pending", "assigned"}:
         raise HTTPException(status_code=409, detail="Review cannot be rejected in its current state")
     now = datetime.now(timezone.utc).isoformat()
@@ -200,9 +240,15 @@ async def reject_review(review_id: uuid.UUID, body: RejectReviewRequest) -> Huma
 
 
 @router.post("/reviews/{review_id}/edit", response_model=HumanReview)
-async def edit_review(review_id: uuid.UUID, body: EditReviewRequest) -> HumanReview:
+async def edit_review(
+    review_id: uuid.UUID,
+    body: EditReviewRequest,
+    account: Account = Depends(get_current_account),
+) -> HumanReview:
     sb = get_supabase()
-    row = await _get_review(sb, str(review_id))
+    await _get_owned_review(sb, str(review_id), account)
+    # Existence guard: _get_review raises 404 when the review is missing.
+    await _get_review(sb, str(review_id))
     now = datetime.now(timezone.utc).isoformat()
     await sb.table("human_reviews").update({
         "status": "edited",

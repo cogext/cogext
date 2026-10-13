@@ -2,9 +2,11 @@
 import logging
 import uuid
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
+from app.core.auth import Account, get_current_account
+from app.core.ownership import get_owned_commitment
 from app.core.state_machine import transition_commitment, validate_transition
 from app.db.connection import get_supabase
 from app.db.row_helpers import row_to_dict
@@ -27,17 +29,15 @@ class StatusUpdate(BaseModel):
 
 
 @router.patch("/commitments/{commitment_id}")
-async def update_status(commitment_id: uuid.UUID, body: StatusUpdate) -> Commitment:
+async def update_status(
+    commitment_id: uuid.UUID,
+    body: StatusUpdate,
+    account: Account = Depends(get_current_account),
+) -> Commitment:
     sb = get_supabase()
 
-    # Verify commitment exists and get current status
-    current_resp = await sb.table("commitments").select("status").eq(
-        "id", str(commitment_id)
-    ).execute()
-    if not current_resp.data:
-        raise HTTPException(status_code=404, detail="Commitment not found")
-
-    current_status = current_resp.data[0]["status"]
+    # The caller must own the commitment (404 otherwise); get its current status
+    current_status = (await get_owned_commitment(sb, commitment_id, account, "status"))["status"]
 
     # Validate transition before hitting DB
     if not validate_transition(current_status, body.status):
@@ -63,15 +63,15 @@ async def update_status(commitment_id: uuid.UUID, body: StatusUpdate) -> Commitm
 
 
 @router.get("/commitments/{commitment_id}")
-async def get_commitment(commitment_id: uuid.UUID) -> Commitment:
+async def get_commitment(
+    commitment_id: uuid.UUID,
+    account: Account = Depends(get_current_account),
+) -> Commitment:
     sb = get_supabase()
-    resp = await sb.table("commitments").select(_COLS).eq(
-        "id", str(commitment_id)
-    ).execute()
-    if not resp.data:
-        raise HTTPException(status_code=404, detail="Commitment not found")
+    # The caller must own the commitment (404 otherwise)
+    row = await get_owned_commitment(sb, commitment_id, account, _COLS)
     try:
-        return Commitment.model_validate(row_to_dict(resp.data[0]))
+        return Commitment.model_validate(row_to_dict(row))
     except Exception as e:
         logger.error("Failed to parse commitment: %s", e)
         raise HTTPException(status_code=500, detail="Failed to parse commitment")
@@ -84,21 +84,19 @@ class ApproveRequest(BaseModel):
 
 
 @router.post("/commitments/{commitment_id}/approve")
-async def approve_commitment(commitment_id: uuid.UUID, body: ApproveRequest) -> dict:
+async def approve_commitment(
+    commitment_id: uuid.UUID,
+    body: ApproveRequest,
+    account: Account = Depends(get_current_account),
+) -> dict:
     """Approve a commitment that is pending_review — transitions it to open.
     Finds the most recent pending/assigned review for the commitment and accepts it.
     Returns JSON with the commitment id and new state.
     """
     sb = get_supabase()
 
-    # Verify commitment exists and is in pending_review
-    c_resp = await sb.table("commitments").select("id, status").eq(
-        "id", str(commitment_id)
-    ).execute()
-    if not c_resp.data:
-        raise HTTPException(status_code=404, detail="Commitment not found")
-
-    current_status = c_resp.data[0]["status"]
+    # The caller must own the commitment (404 otherwise), and it must be pending_review
+    current_status = (await get_owned_commitment(sb, commitment_id, account, "id, status"))["status"]
     if current_status not in ("pending_review", "PENDING_REVIEW"):
         raise HTTPException(
             status_code=409,

@@ -12,7 +12,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from app.core.auth import Account, get_current_account
-from app.core.receipt import generate_receipt_token, verify_receipt_token
+from app.core.receipt import ReceiptSigningUnavailable, generate_receipt_token, verify_receipt_token
 from app.db.connection import get_supabase
 
 logger = logging.getLogger(__name__)
@@ -61,12 +61,16 @@ async def create_receipt(
     if data.get("receipt_token"):
         token = data["receipt_token"]
     else:
-        token = generate_receipt_token(
-            commitment_id=data["id"],
-            user_id=data["user_id"],
-            promise_text=data["promise_text"],
-            created_at=str(data.get("created_at", "")),
-        )
+        try:
+            token = generate_receipt_token(
+                commitment_id=data["id"],
+                user_id=data["user_id"],
+                promise_text=data["promise_text"],
+                created_at=str(data.get("created_at", "")),
+            )
+        except ReceiptSigningUnavailable:
+            # Fail closed: never issue a token signed with a missing or public key.
+            raise HTTPException(status_code=503, detail="Receipt signing is not configured")
         await sb.table("commitments").update({"receipt_token": token}).eq("id", data["id"]).execute()
 
     return ReceiptResponse(

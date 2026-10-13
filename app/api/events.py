@@ -2,8 +2,10 @@
 import logging
 import uuid
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 
+from app.core.auth import Account, get_current_account
+from app.core.ownership import get_owned_commitment
 from app.db.connection import get_supabase
 from app.models.event import CommitmentEvent, EventListResponse
 
@@ -16,8 +18,11 @@ async def get_events(
     commitment_id: uuid.UUID,
     limit: int = Query(default=100, ge=1, le=500),
     event_type: str | None = None,
+    account: Account = Depends(get_current_account),
 ) -> EventListResponse:
     sb = get_supabase()
+    # Events belong to their commitment; the caller must own it (404 otherwise)
+    await get_owned_commitment(sb, commitment_id, account, "id")
 
     query = sb.table("commitment_events").select("*").eq(
         "commitment_id", str(commitment_id)

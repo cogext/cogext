@@ -18,11 +18,22 @@ class Settings(BaseSettings):
     APP_ENV: str = "development"
     SLACK_WEBHOOK_URL: str = ""
     ACTION_TOKEN_SECRET: str = ""
-    OBSERVE_RECEIPT_KEY: str = "cogext-observe-receipt-v1"
+    # Private key for verifying observer-signed live receipts. No default: the
+    # old default was public, so receipts signed with it are forgeable. Unset,
+    # short or publicly known keys make every receipt "unverifiable".
+    OBSERVE_RECEIPT_KEY: str = ""
+    # ISO-8601 timestamp with timezone. Receipts stored before it whose
+    # signature matches the old public observer key are reported "legacy"
+    # (never "valid"). Unset: none are. Never set it in the future.
+    LIVE_RECEIPT_LEGACY_CUTOFF: str = ""
     # Present in .env and read via os.getenv in app/api/paypal_webhook.py.
     # Declared here because pydantic-settings rejects undeclared env keys.
     RESEND_API_KEY: str = ""
     PAYPAL_WEBHOOK_ID: str = ""
+    # REST app credentials, used only to obtain the OAuth token that PayPal's
+    # verify-webhook-signature API requires. Read via os.getenv in paypal_webhook.py.
+    PAYPAL_CLIENT_ID: str = ""
+    PAYPAL_CLIENT_SECRET: str = ""
     SMTP_HOST: str = "smtp.gmail.com"
     SMTP_PORT: int = 465
     SMTP_USER: str = ""

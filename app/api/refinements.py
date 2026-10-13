@@ -3,8 +3,10 @@ import logging
 import uuid
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends
 
+from app.core.auth import Account, get_current_account
+from app.core.ownership import get_owned_commitment
 from app.db.connection import get_supabase
 from app.models.refinement import (
     ApplyRefinementRequest,
@@ -20,22 +22,20 @@ router = APIRouter()
 async def apply_refinement(
     commitment_id: uuid.UUID,
     body: ApplyRefinementRequest,
+    account: Account = Depends(get_current_account),
 ) -> RefinementHistory:
-    """Apply a refinement to a commitment.
+    """Apply a refinement to a commitment the caller owns.
 
     Each field change is appended as an immutable CommitmentChange record.
-    Historical values never disappear.
+    Historical values never disappear. Only REFINABLE_FIELDS can change
+    (enforced by ApplyRefinementRequest).
     """
     sb = get_supabase()
 
-    # Verify commitment exists and fetch current values
-    c_resp = await sb.table("commitments").select("*").eq(
-        "id", str(commitment_id)
-    ).execute()
-    if not c_resp.data:
-        raise HTTPException(status_code=404, detail="Commitment not found")
-
-    c_row = c_resp.data[0]
+    # Both commitments must belong to the caller, checked before any write.
+    c_row = await get_owned_commitment(sb, commitment_id, account)
+    if body.supersedes is not None:
+        await get_owned_commitment(sb, body.supersedes, account, columns="id")
     now = datetime.now(timezone.utc).isoformat()
     changes: list[CommitmentChange] = []
     db_updates: dict = {}
@@ -82,7 +82,7 @@ async def apply_refinement(
         db_updates["updated_at"] = now
         await sb.table("commitments").update(db_updates).eq(
             "id", str(commitment_id)
-        ).execute()
+        ).eq("user_id", account.account_id).execute()
 
     # Handle supersession link — mark the ORIGINAL commitment as superseded
     if body.supersedes is not None:
@@ -93,7 +93,7 @@ async def apply_refinement(
             await sb.table("commitments").update({
                 "superseded_by": str(commitment_id),
                 "updated_at": now,
-            }).eq("id", str(original_id)).execute()
+            }).eq("id", str(original_id)).eq("user_id", account.account_id).execute()
             # Transition the original through the state machine
             await transition_commitment(
                 original_id,
@@ -122,8 +122,13 @@ async def apply_refinement(
 
 
 @router.get("/commitments/{commitment_id}/refinements", response_model=RefinementHistory)
-async def get_refinements(commitment_id: uuid.UUID) -> RefinementHistory:
+async def get_refinements(
+    commitment_id: uuid.UUID,
+    account: Account = Depends(get_current_account),
+) -> RefinementHistory:
     sb = get_supabase()
+    # Change history belongs to its commitment; the caller must own it (404 otherwise)
+    await get_owned_commitment(sb, commitment_id, account, "id")
     resp = await sb.table("commitment_changes").select("*").eq(
         "commitment_id", str(commitment_id)
     ).order("timestamp", desc=False).execute()

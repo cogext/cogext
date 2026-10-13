@@ -19,7 +19,7 @@ from postgrest.exceptions import APIError
 from pydantic import BaseModel
 
 from app.db.connection import get_supabase
-from app.core.live_receipt_verify import verify_live_receipt as _verify
+from app.core.live_receipt_verify import live_receipt_status
 
 router = APIRouter()
 
@@ -333,4 +333,7 @@ async def get_receipt(receipt_id: str):
 @router.get("/receipt/{receipt_id}/verify")
 async def verify_receipt_route(receipt_id: str):
     receipt = await get_receipt(receipt_id)
-    return {"valid": _verify(receipt)}
+    # Only "valid" sets valid=true. "legacy", "unsigned", "invalid" and
+    # "unverifiable" are explained in app/core/live_receipt_verify.py.
+    status = live_receipt_status(receipt)
+    return {"valid": status == "valid", "status": status}

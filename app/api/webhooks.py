@@ -8,6 +8,11 @@ Security:
     the database. That is a separate change tracked for a later phase.
   - SSRF protection: reject private/loopback IP ranges
   - At-least-once delivery with exponential backoff
+  - Tenant isolation: a subscription belongs to the account that created it
+    (webhook_subscriptions.account_id, migration 011). Every route is scoped to
+    the caller's account, and events are delivered only to subscriptions of
+    the account that produced them. Rows with no owner (created before 011)
+    are invisible to every account and receive nothing.
 """
 import hashlib
 import hmac
@@ -20,8 +25,9 @@ from typing import Any
 from urllib.parse import urlparse
 
 import httpx
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 
+from app.core.auth import Account, get_current_account
 from app.db.connection import get_supabase
 from app.models.webhook import (
     CreateWebhookRequest,
@@ -45,6 +51,12 @@ _PRIVATE_RANGES = [
 
 MAX_ATTEMPTS = 5
 BACKOFF_BASE_SECONDS = 30
+
+# Columns safe to return: never secret_hash, never account_id.
+_PUBLIC_COLS = "id, endpoint, active, subscribed_event_types, created_at, updated_at, failure_count, last_delivery_at"
+
+_NOT_FOUND = "Webhook not found"
+_DUPLICATE = "An active webhook for this endpoint already exists"
 
 
 def _is_ssrf_safe(url: str) -> bool:
@@ -72,12 +84,30 @@ def _sign_payload(secret: str, body: bytes) -> str:
     return hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
 
 
+def _is_unique_violation(err: Exception) -> bool:
+    return getattr(err, "code", None) == "23505"
+
+
+async def _get_owned_webhook(sb: Any, webhook_id: uuid.UUID, account: Account) -> dict:
+    """Return the caller's subscription, else 404 (same for another account's,
+    an ownerless, or a missing subscription)."""
+    resp = await sb.table("webhook_subscriptions").select(_PUBLIC_COLS).eq(
+        "id", str(webhook_id)
+    ).eq("account_id", account.account_id).execute()
+    if not resp.data:
+        raise HTTPException(status_code=404, detail=_NOT_FOUND)
+    return resp.data[0]
+
+
 # ---------------------------------------------------------------------------
 # Subscription CRUD
 # ---------------------------------------------------------------------------
 
 @router.post("/webhooks", response_model=WebhookSubscriptionResponse)
-async def create_webhook(body: CreateWebhookRequest) -> WebhookSubscriptionResponse:
+async def create_webhook(
+    body: CreateWebhookRequest,
+    account: Account = Depends(get_current_account),
+) -> WebhookSubscriptionResponse:
     if not _is_ssrf_safe(body.endpoint):
         raise HTTPException(status_code=400, detail="Endpoint URL is not allowed (SSRF protection)")
 
@@ -85,32 +115,36 @@ async def create_webhook(body: CreateWebhookRequest) -> WebhookSubscriptionRespo
     wh_id = uuid.uuid4()
     now = datetime.now(timezone.utc).isoformat()
 
-    await sb.table("webhook_subscriptions").insert({
-        "id": str(wh_id),
-        "endpoint": body.endpoint,
-        "active": True,
-        "subscribed_event_types": body.subscribed_event_types,
-        # Plaintext by design — see module docstring.
-        "secret_hash": body.secret,  # stored as plaintext; never returned in API responses
-        "failure_count": 0,
-        "created_at": now,
-        "updated_at": now,
-    }).execute()
+    try:
+        await sb.table("webhook_subscriptions").insert({
+            "id": str(wh_id),
+            "account_id": account.account_id,
+            "endpoint": body.endpoint,
+            "active": True,
+            "subscribed_event_types": body.subscribed_event_types,
+            # Plaintext by design — see module docstring.
+            "secret_hash": body.secret,  # stored as plaintext; never returned in API responses
+            "failure_count": 0,
+            "created_at": now,
+            "updated_at": now,
+        }).execute()
+    except Exception as e:
+        if _is_unique_violation(e):
+            raise HTTPException(status_code=409, detail=_DUPLICATE)
+        raise
 
-    resp = await sb.table("webhook_subscriptions").select(
-        "id, endpoint, active, subscribed_event_types, created_at, updated_at, failure_count, last_delivery_at"
-    ).eq("id", str(wh_id)).execute()
-    return WebhookSubscriptionResponse.model_validate(resp.data[0])
+    return WebhookSubscriptionResponse.model_validate(await _get_owned_webhook(sb, wh_id, account))
 
 
 @router.get("/webhooks", response_model=list[WebhookSubscriptionResponse])
 async def list_webhooks(
     active: bool | None = None,
     limit: int = Query(default=50, ge=1, le=200),
+    account: Account = Depends(get_current_account),
 ) -> list[WebhookSubscriptionResponse]:
     sb = get_supabase()
-    q = sb.table("webhook_subscriptions").select(
-        "id, endpoint, active, subscribed_event_types, created_at, updated_at, failure_count, last_delivery_at"
+    q = sb.table("webhook_subscriptions").select(_PUBLIC_COLS).eq(
+        "account_id", account.account_id
     ).limit(limit)
     if active is not None:
         q = q.eq("active", active)
@@ -119,19 +153,22 @@ async def list_webhooks(
 
 
 @router.get("/webhooks/{webhook_id}", response_model=WebhookSubscriptionResponse)
-async def get_webhook(webhook_id: uuid.UUID) -> WebhookSubscriptionResponse:
+async def get_webhook(
+    webhook_id: uuid.UUID,
+    account: Account = Depends(get_current_account),
+) -> WebhookSubscriptionResponse:
     sb = get_supabase()
-    resp = await sb.table("webhook_subscriptions").select(
-        "id, endpoint, active, subscribed_event_types, created_at, updated_at, failure_count, last_delivery_at"
-    ).eq("id", str(webhook_id)).execute()
-    if not resp.data:
-        raise HTTPException(status_code=404, detail="Webhook not found")
-    return WebhookSubscriptionResponse.model_validate(resp.data[0])
+    return WebhookSubscriptionResponse.model_validate(await _get_owned_webhook(sb, webhook_id, account))
 
 
 @router.patch("/webhooks/{webhook_id}", response_model=WebhookSubscriptionResponse)
-async def update_webhook(webhook_id: uuid.UUID, body: UpdateWebhookRequest) -> WebhookSubscriptionResponse:
+async def update_webhook(
+    webhook_id: uuid.UUID,
+    body: UpdateWebhookRequest,
+    account: Account = Depends(get_current_account),
+) -> WebhookSubscriptionResponse:
     sb = get_supabase()
+    await _get_owned_webhook(sb, webhook_id, account)
     updates: dict[str, Any] = {"updated_at": datetime.now(timezone.utc).isoformat()}
     if body.endpoint is not None:
         if not _is_ssrf_safe(body.endpoint):
@@ -145,21 +182,27 @@ async def update_webhook(webhook_id: uuid.UUID, body: UpdateWebhookRequest) -> W
         # Plaintext by design — see module docstring.
         updates["secret_hash"] = body.secret  # stored as plaintext; never returned in API responses
 
-    await sb.table("webhook_subscriptions").update(updates).eq("id", str(webhook_id)).execute()
-    resp = await sb.table("webhook_subscriptions").select(
-        "id, endpoint, active, subscribed_event_types, created_at, updated_at, failure_count, last_delivery_at"
-    ).eq("id", str(webhook_id)).execute()
-    if not resp.data:
-        raise HTTPException(status_code=404, detail="Webhook not found")
-    return WebhookSubscriptionResponse.model_validate(resp.data[0])
+    try:
+        await sb.table("webhook_subscriptions").update(updates).eq(
+            "id", str(webhook_id)
+        ).eq("account_id", account.account_id).execute()
+    except Exception as e:
+        if _is_unique_violation(e):
+            raise HTTPException(status_code=409, detail=_DUPLICATE)
+        raise
+    return WebhookSubscriptionResponse.model_validate(await _get_owned_webhook(sb, webhook_id, account))
 
 
 @router.delete("/webhooks/{webhook_id}")
-async def delete_webhook(webhook_id: uuid.UUID) -> dict:
+async def delete_webhook(
+    webhook_id: uuid.UUID,
+    account: Account = Depends(get_current_account),
+) -> dict:
     sb = get_supabase()
+    await _get_owned_webhook(sb, webhook_id, account)
     await sb.table("webhook_subscriptions").update(
         {"active": False, "updated_at": datetime.now(timezone.utc).isoformat()}
-    ).eq("id", str(webhook_id)).execute()
+    ).eq("id", str(webhook_id)).eq("account_id", account.account_id).execute()
     return {"deactivated": True, "webhook_id": str(webhook_id)}
 
 
@@ -167,14 +210,27 @@ async def delete_webhook(webhook_id: uuid.UUID) -> dict:
 # Delivery engine
 # ---------------------------------------------------------------------------
 
-async def deliver_event(event_id: str, event_type: str, payload: dict[str, Any]) -> int:
-    """Deliver an event to all matching active subscriptions.  Returns delivery count."""
+async def deliver_event(
+    event_id: str,
+    event_type: str,
+    payload: dict[str, Any],
+    *,
+    account_id: str | None,
+) -> int:
+    """Deliver an event to the producing account's matching active subscriptions.
+
+    account_id is required and keyword-only so no caller can deliver unscoped.
+    Without an account nothing is delivered. Returns the delivery count.
+    """
+    if not account_id:
+        logger.warning("deliver_event called without an account; %s not delivered", event_type)
+        return 0
     sb = get_supabase()
 
-    # Find matching subscriptions (subscribed to this event type or all events)
+    # The account's subscriptions to this event type (or to all events)
     subs_resp = await sb.table("webhook_subscriptions").select(
         "id, endpoint, secret_hash, subscribed_event_types"
-    ).eq("active", True).execute()
+    ).eq("active", True).eq("account_id", account_id).execute()
 
     matching = [
         s for s in (subs_resp.data or [])
@@ -266,8 +322,10 @@ async def _attempt_delivery(
 async def list_deliveries(
     webhook_id: uuid.UUID,
     limit: int = Query(default=50, ge=1, le=200),
+    account: Account = Depends(get_current_account),
 ) -> list[WebhookDelivery]:
     sb = get_supabase()
+    await _get_owned_webhook(sb, webhook_id, account)
     resp = await sb.table("webhook_deliveries").select("*").eq(
         "webhook_id", str(webhook_id)
     ).order("delivered_at", desc=True).limit(limit).execute()

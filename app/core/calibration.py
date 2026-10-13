@@ -25,15 +25,13 @@ def _bucket_label(lo: float, hi: float) -> str:
     return f"{lo:.2f}-{hi:.2f}"
 
 
-async def get_calibration_report(user_id: str | None = None) -> dict[str, Any]:
-    """Return calibration data bucketed by extraction confidence."""
+async def get_calibration_report(user_id: str) -> dict[str, Any]:
+    """Return calibration data for one account's commitments, bucketed by extraction confidence."""
     sb = get_supabase()
 
     query = sb.table("commitments").select(
         "id, confidence, status, extraction_model"
-    )
-    if user_id:
-        query = query.eq("user_id", user_id)
+    ).eq("user_id", user_id)
 
     resp = await query.execute()
     rows = resp.data or []
@@ -46,6 +44,9 @@ async def get_calibration_report(user_id: str | None = None) -> dict[str, Any]:
             "sample_count": 0,
             "fulfilled_rate": 0.0,
             "contradiction_rate": 0.0,
+            # NOTE: not yet computed. The query below does not select review or
+            # deadline-correction data, so these are always 0.0. Kept in the
+            # response for backward compatibility.
             "review_correction_rate": 0.0,
             "deadline_correction_rate": 0.0,
             "_fulfilled": 0,

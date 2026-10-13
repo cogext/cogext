@@ -13,9 +13,9 @@ Pipeline:
 """
 from __future__ import annotations
 
+import hashlib
 import logging
 from typing import Any
-from uuid import UUID
 
 from app.core.evidence_adapters.base import NormalisedEvidence
 from app.core.evidence_adapters.gmail import GmailAdapter
@@ -53,25 +53,17 @@ async def run_verification(
     # Score relevance using LLM (cheap: short prompt)
     score, reason = await _score_evidence(commitment, evidence)
 
-    # Persist evidence record
+    # Verification may only succeed on evidence actually stored for this
+    # commitment. If it is not stored, nothing else changes.
     sb = get_supabase()
-    evidence_row = {
-        "id": evidence.external_event_id,
-        "commitment_id": str(commitment.id),
-        "external_system": evidence.external_system,
-        "source": evidence.source,
-        "actor": evidence.actor,
-        "data": evidence.data,
-        "occurred_at": evidence.occurred_at.isoformat(),
-        "recorded_at": evidence.recorded_at.isoformat(),
-        "provenance": evidence.provenance,
-        "raw_reference": evidence.raw_reference,
-        "relevance_score": score,
-    }
-    try:
-        await sb.table("evidence").upsert(evidence_row, on_conflict="id", ignore_duplicates=True).execute()
-    except Exception as e:
-        logger.warning("Evidence persist failed: %s", e)
+    evidence_id = await _persist_evidence(sb, commitment, evidence, score)
+    if evidence_id is None:
+        return {
+            "status": "evidence_not_recorded",
+            "score": score,
+            "evidence_id": None,
+            "reason": "Evidence could not be recorded for this commitment; verification was not applied.",
+        }
 
     # Transition commitment based on score
     if score >= _VERIFY_THRESHOLD:
@@ -84,16 +76,18 @@ async def run_verification(
         new_status = None
         v_status = "pending"
 
-    if new_status:
+    if new_status and commitment.status != new_status:
         try:
             await transition_commitment(
                 _uuid.UUID(str(commitment.id)),
                 new_status,
                 actor=actor,
-                data={"evidence_id": evidence.external_event_id, "score": score, "reason": reason},
+                data={"evidence_id": evidence_id, "score": score, "reason": reason},
             )
         except Exception as e:
+            # Do not record "verified" for a commitment whose status did not change.
             logger.warning("Verifier transition failed: %s", e)
+            return {"status": "transition_failed", "score": score, "evidence_id": evidence_id, "reason": reason}
 
     # Update verification_status on commitment row directly
     try:
@@ -107,9 +101,55 @@ async def run_verification(
     return {
         "status": v_status,
         "score": score,
-        "evidence_id": evidence.external_event_id,
+        "evidence_id": evidence_id,
         "reason": reason,
     }
+
+
+async def _persist_evidence(
+    sb: Any, commitment: Commitment, evidence: NormalisedEvidence, score: float
+) -> str | None:
+    """Store *evidence* for *commitment*. Return the stored row's id, or None.
+
+    The idempotency key has the same account-scoped format as
+    app/api/evidence.py (and migration 012), so an external event is stored once
+    per account and never collides with another account's evidence. A duplicate
+    counts as stored only if the existing row belongs to this commitment.
+    """
+    idem_key = hashlib.sha256(
+        f"{commitment.user_id}:{evidence.external_system}:{evidence.external_event_id}".encode()
+    ).hexdigest()
+    row = {
+        "id": str(_uuid.uuid4()),
+        "commitment_id": str(commitment.id),
+        "source": evidence.source,
+        "external_system": evidence.external_system,
+        "external_event_id": evidence.external_event_id,
+        "actor": evidence.actor,
+        "provenance": evidence.provenance,
+        "raw_reference": evidence.raw_reference,
+        "adapter_version": evidence.adapter_version,
+        "data": evidence.data,
+        "occurred_at": evidence.occurred_at.isoformat(),
+        "recorded_at": evidence.recorded_at.isoformat(),
+        "score": score,
+        "idempotency_key": idem_key,
+    }
+    try:
+        result = await sb.table("evidence").upsert(
+            row, on_conflict="idempotency_key", ignore_duplicates=True
+        ).execute()
+        if result and result.data:
+            return row["id"]
+        existing = await sb.table("evidence").select("id, commitment_id").eq(
+            "idempotency_key", idem_key
+        ).maybe_single().execute()
+    except Exception as e:
+        logger.warning("Evidence persist failed: %s", e)
+        return None
+    if existing and existing.data and str(existing.data.get("commitment_id")) == str(commitment.id):
+        return str(existing.data["id"])
+    return None
 
 
 async def _score_evidence(commitment: Commitment, evidence: NormalisedEvidence) -> tuple[float, str]:
