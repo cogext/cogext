@@ -1,9 +1,12 @@
-"""LLM provider — DeepSeek is the active provider.
+"""LLM provider — Anthropic Claude is the active provider.
 
-Groq is retained only as a dead fallback: _groq_extract is reached solely when
-LLM_PROVIDER is explicitly set to "groq". Both APIs are OpenAI-compatible, so
-only the base URL, the model and the key env var differ.
+Exactly one provider runs per call, chosen by LLM_PROVIDER. There is no
+cross-provider fallback: if Claude fails, the call raises; it never retries on
+DeepSeek or Groq. DeepSeek and Groq are retained only for an explicit
+LLM_PROVIDER="deepseek" / "groq" rollback.
 """
+
+import re
 
 from config import settings
 
@@ -32,11 +35,42 @@ def _get_deepseek_client():
     return _deepseek_client
 
 
+# ── Anthropic ─────────────────────────────────────────────────────────────────
+_anthropic_client = None
+
+# Models that accept the server-side refusal fallback (another Claude model
+# re-runs a request Claude declined, inside the same call).
+_ANTHROPIC_FALLBACK_MODELS = {
+    "claude-fable-5-1", "claude-opus-5-5", "claude-opus-5", "claude-sonnet-5-5",
+}
+
+_JSON_SYSTEM_PROMPT = (
+    "Respond with only valid JSON. No markdown code fences, no commentary "
+    "before or after the JSON."
+)
+
+_FENCE_RE = re.compile(r"^\s*```(?:json)?\s*\n?(.*?)\n?\s*```\s*$", re.DOTALL)
+
+
+def _get_anthropic_client():
+    global _anthropic_client
+    if not settings.ANTHROPIC_API_KEY:
+        raise RuntimeError("Anthropic API error: ANTHROPIC_API_KEY is not configured")
+    if _anthropic_client is None:
+        import anthropic
+        # SDK defaults: 600s timeout, 2 retries on connection errors, 408/409/429/5xx
+        # — the same as the OpenAI client used for DeepSeek.
+        _anthropic_client = anthropic.Anthropic(api_key=settings.ANTHROPIC_API_KEY)
+    return _anthropic_client
+
+
 # ── Dispatch ──────────────────────────────────────────────────────────────────
 def extract_completion(prompt: str, response_format: str = "json") -> str:
     provider = settings.LLM_PROVIDER.lower()
 
-    if provider == "groq":
+    if provider == "anthropic":
+        return _anthropic_extract(prompt, response_format)
+    elif provider == "groq":
         return _groq_extract(prompt, response_format)
     elif provider == "deepseek":
         return _deepseek_extract(prompt, response_format)
@@ -77,3 +111,41 @@ def _deepseek_extract(prompt: str, response_format: str) -> str:
         return response.choices[0].message.content
     except Exception as e:
         raise RuntimeError(f"DeepSeek API error: {e}") from e
+
+
+def _anthropic_extract(prompt: str, response_format: str) -> str:
+    import anthropic
+    client = _get_anthropic_client()
+    model = settings.ANTHROPIC_MODEL
+    kwargs = {
+        "model": model,
+        "max_tokens": 16000,
+        "messages": [{"role": "user", "content": prompt}],
+    }
+    if response_format == "json":
+        kwargs["system"] = _JSON_SYSTEM_PROMPT
+    try:
+        if model in _ANTHROPIC_FALLBACK_MODELS:
+            response = client.beta.messages.create(
+                betas=["server-side-fallback-2026-07-01"],
+                fallbacks="default",
+                **kwargs,
+            )
+        else:
+            response = client.messages.create(**kwargs)
+    except anthropic.APIError as e:
+        raise RuntimeError(f"Anthropic API error: {e}") from e
+
+    if response.stop_reason == "refusal":
+        raise RuntimeError("Anthropic API error: request was refused by the model")
+    if response.stop_reason == "max_tokens":
+        raise RuntimeError("Anthropic API error: response truncated at max_tokens")
+
+    text = "".join(b.text for b in response.content if b.type == "text")
+    if response_format == "json":
+        # Callers json.loads() the result directly; DeepSeek's json_object mode
+        # never wrapped it in fences, so strip them if Claude does.
+        match = _FENCE_RE.match(text)
+        if match:
+            text = match.group(1)
+    return text.strip()

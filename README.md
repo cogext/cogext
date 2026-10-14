@@ -317,7 +317,9 @@ keys found in `.env`, so adding an undeclared variable will crash startup.
 | `SUPABASE_URL` | no | `""` | Project URL |
 | `SUPABASE_ANON_KEY` | no | `""` | Anon key |
 | `SUPABASE_SERVICE_ROLE_KEY` | no | `""` | Service role key — server-side only |
-| `LLM_PROVIDER` | no | `groq` | `groq` or `openai` |
+| `LLM_PROVIDER` | no | `anthropic` | `anthropic`, `deepseek` or `groq` — no automatic fallback between them |
+| `ANTHROPIC_API_KEY` | yes, when `LLM_PROVIDER=anthropic` | `""` | From console.anthropic.com |
+| `ANTHROPIC_MODEL` | no | `claude-opus-5-5` | Any Claude model ID your account can use |
 | `GROQ_API_KEY` | no | `""` | From console.groq.com |
 | `GROQ_MODEL` | no | `llama3-70b-8192` | |
 | `DEEPSEEK_API_KEY` | no | `""` | Alternative provider |

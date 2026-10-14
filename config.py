@@ -5,9 +5,12 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
 
     DATABASE_URL: str
-    # DeepSeek is the active provider. Groq stays declared as a dead fallback:
-    # it is only reached if LLM_PROVIDER is set back to "groq" explicitly.
-    LLM_PROVIDER: str = "deepseek"
+    # Anthropic is the active provider. DeepSeek and Groq are only reached if
+    # LLM_PROVIDER is set to "deepseek" or "groq" explicitly; there is no
+    # automatic fallback between providers.
+    LLM_PROVIDER: str = "anthropic"
+    ANTHROPIC_API_KEY: str = ""
+    ANTHROPIC_MODEL: str = "claude-opus-5-5"
     GROQ_API_KEY: str = ""
     GROQ_MODEL: str = "llama3-70b-8192"
     DEEPSEEK_API_KEY: str = ""
