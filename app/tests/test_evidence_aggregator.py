@@ -170,7 +170,13 @@ def test_score_partial_match():
         commitment_object="contract",   # not in data
         commitment_deadline=None,
     )
-    # Should match action (0.40) and recipient (0.30)
+    # Free text proves the action word only. A recipient mentioned in prose is
+    # not a delivery record, so it no longer counts (field-aware matching).
+    assert score == pytest.approx(0.40)
+    assert [d.field for d in details if d.matched] == ["action"]
+
+    structured = {"text": "send the thing", "to": "sarah@example.com"}
+    score, _ = score_evidence_against_commitment(structured, "send", "Sarah", "contract", None)
     assert score == pytest.approx(0.70)
 
 

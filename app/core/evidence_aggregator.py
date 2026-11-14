@@ -13,6 +13,9 @@ by some unrelated record does not count.
 """
 from collections.abc import Iterable
 import logging
+import re
+from email.utils import getaddresses
+from typing import Any
 from uuid import UUID
 
 from app.models.evidence import Evidence, EvidenceAggregation, FieldMatchDetail
@@ -118,6 +121,89 @@ def aggregate_evidence(
     )
 
 
+# ---------------------------------------------------------------------------
+# Field-aware matching
+#
+# Evidence is matched field by field, never as one blob of text:
+#   * recipient: exact address in a recipient field (to/cc/...); a plain name
+#     must appear as a whole word in a recipient field
+#   * object: a file must equal an attachment/file name exactly (basename);
+#     anything else must appear as a whole token in an object field
+#   * action: whole word (send/sent/sending...), in any value
+# Free text (body, subject, snippet...) never satisfies recipient or object:
+# "could not attach contract.pdf" is a mention, not evidence. Keys are never
+# evidence, only values.
+# ---------------------------------------------------------------------------
+_FREE_TEXT = {"body", "text", "snippet", "message", "note", "notes", "description", "summary",
+              "content", "subject", "comment", "comments", "reason", "raw", "html", "title"}
+_RECIPIENT = {"to", "cc", "bcc", "recipient", "recipients", "assignee", "assignees", "channel",
+              "target", "destination", "email", "emails", "address", "addresses"}
+_OBJECT = {"object", "attachment", "attachments", "file", "files", "filename", "filenames", "path",
+           "paths", "artifact", "artifacts", "document", "documents", "name", "version", "tag", "ref",
+           "id", "order", "order_id", "ticket", "ticket_id", "invoice", "invoice_id", "sku", "url", "key"}
+_IRREGULAR = {"send": {"sent"}, "pay": {"paid"}, "make": {"made"}, "build": {"built"},
+              "write": {"wrote", "written"}, "run": {"ran"}, "do": {"did", "done"},
+              "buy": {"bought"}, "tell": {"told"}, "find": {"found"}, "give": {"gave", "given"},
+              "set": {"set"}, "put": {"put"}, "get": {"got", "gotten"}, "move": {"moved"}}
+_EMAIL = re.compile(r"[^@\s<>]+@[^@\s<>]+\.[^@\s<>]+")
+_FILELIKE = re.compile(r"(\.[a-z0-9]{1,6}$)|/")
+
+
+def _flatten(data: Any, keys: tuple[str, ...] = ()) -> list[tuple[str | None, str]]:
+    """(field class, value) for every scalar value; class from the outermost known key."""
+    out: list[tuple[str | None, str]] = []
+    if isinstance(data, dict):
+        for k, v in data.items():
+            out += _flatten(v, keys + (str(k).lower(),))
+    elif isinstance(data, (list, tuple, set)):
+        for v in data:
+            out += _flatten(v, keys)
+    elif data is not None and not isinstance(data, bool):
+        cls = None
+        for k in keys:
+            if k in _FREE_TEXT: cls = "free"; break
+            if k in _RECIPIENT: cls = "recipient"; break
+            if k in _OBJECT: cls = "object"; break
+        out.append((cls, str(data).strip().lower()))
+    return out
+
+
+def _word(target: str, text: str, extra: str = "") -> bool:
+    """Whole-token match: target not glued to word characters (or `extra`)."""
+    b = r"[\w" + re.escape(extra) + r"]"
+    return re.search(rf"(?<!{b}){re.escape(target)}(?!{b})", text) is not None
+
+
+def _action_forms(action: str) -> set[str]:
+    a = action.strip().lower()
+    forms = {a, a + "s", a + "es", a + "ed", a + "d", a + "ing"} | _IRREGULAR.get(a, set())
+    if a.endswith("e"):
+        forms.add(a[:-1] + "ing")
+    return forms
+
+
+def _match_action(target: str, values: list[tuple[str | None, str]]) -> bool:
+    forms = _action_forms(target)
+    return any(_word(f, v) for _, v in values for f in forms)
+
+
+def _match_recipient(target: str, values: list[tuple[str | None, str]]) -> bool:
+    t = target.strip().lower()
+    fields = [v for c, v in values if c == "recipient"]
+    if _EMAIL.fullmatch(t):
+        return any(addr.lower() == t for v in fields for _, addr in getaddresses([v]))
+    return any(_word(t, v) for v in fields)
+
+
+def _match_object(target: str, values: list[tuple[str | None, str]]) -> bool:
+    t = target.strip().lower()
+    fields = [v for c, v in values if c == "object"]
+    if _FILELIKE.search(t):
+        base = re.split(r"[\\/]", t)[-1]
+        return any(re.split(r"[\\/]", v)[-1] == base for v in fields)
+    return any(_word(t, v, ".-/") for v in fields)
+
+
 def score_evidence_against_commitment(
     evidence_data: dict,
     commitment_action: str | None,
@@ -125,35 +211,26 @@ def score_evidence_against_commitment(
     commitment_object: str | None,
     commitment_deadline: str | None,
 ) -> tuple[float, list[FieldMatchDetail]]:
-    """Score a single evidence record against commitment fields.
+    """Score a single evidence record against commitment fields, field by field.
 
-    Returns (score, match_details).
-    Uses simple string containment for now; replace with semantic similarity later.
+    Returns (score, match_details). See "Field-aware matching" above.
     """
+    values = _flatten(evidence_data)
+    checks = {
+        "action": lambda t: _match_action(t, values),
+        "recipient": lambda t: _match_recipient(t, values),
+        "object": lambda t: _match_object(t, values),
+        "deadline": lambda t: any(_word(t.strip().lower(), v, ".:-") for _, v in values),
+    }
     details: list[FieldMatchDetail] = []
-    text = str(evidence_data).lower()
-
-    def _check(field: str, target: str | None) -> FieldMatchDetail:
+    for field, target in (("action", commitment_action), ("recipient", commitment_recipient),
+                          ("object", commitment_object), ("deadline", commitment_deadline)):
         weight = FIELD_WEIGHTS[field]
-        if not target:
-            return FieldMatchDetail(
-                field=field, weight=weight, matched=False, score_contribution=0.0
-            )
-        target_lower = target.lower()
-        matched = target_lower in text
-        score = weight if matched else 0.0
-        return FieldMatchDetail(
-            field=field,
-            weight=weight,
-            matched=matched,
-            matched_value=target if matched else None,
-            score_contribution=score,
-        )
-
-    details.append(_check("action", commitment_action))
-    details.append(_check("recipient", commitment_recipient))
-    details.append(_check("object", commitment_object))
-    details.append(_check("deadline", commitment_deadline))
-
+        ok = bool(target and target.strip()) and checks[field](target)
+        details.append(FieldMatchDetail(
+            field=field, weight=weight, matched=ok,
+            matched_value=target if ok else None,
+            score_contribution=weight if ok else 0.0,
+        ))
     total_score = sum(d.score_contribution for d in details)
     return round(total_score, 4), details

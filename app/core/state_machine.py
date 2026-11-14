@@ -16,10 +16,30 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
+from app.core.evidence_aggregator import missing_required, required_fields
 from app.db.connection import get_supabase
+from app.models.evidence import FieldMatchDetail
 from app.models.commitment import Commitment, CommitmentStatus
 
 logger = logging.getLogger(__name__)
+
+
+def _qualifying_evidence(rows: list[dict], required: list[str]) -> tuple[float, bool]:
+    """Best score, and whether ONE record proves the commitment.
+
+    A record qualifies when its score is >= 0.7 and it matched the action and
+    every named gated field itself. Records scored by the API carry their field
+    matches; records stored by the verifier passed the same gates before they
+    were scored, so their score alone is the verdict.
+    """
+    best, ok = 0.0, False
+    for r in rows:
+        score = float(r.get("score") or 0)
+        best = max(best, score)
+        details = [FieldMatchDetail.model_validate(d) for d in (r.get("match_details") or [])]
+        if score >= 0.7 and (not details or not missing_required(details, required)):
+            ok = True
+    return best, ok
 
 # ---------------------------------------------------------------------------
 # Valid transitions – spec V1.5
@@ -70,18 +90,19 @@ async def transition_commitment(
     # Evidence gate — block fulfilled for external commitments lacking strong evidence
     best_score = 0.0
     if target_status == "fulfilled":
-        c_resp = await sb.table("commitments").select("shape").eq(
+        c_resp = await sb.table("commitments").select("shape, recipient, object").eq(
             "id", str(commitment_id)
         ).maybe_single().execute()
         if c_resp and c_resp.data and c_resp.data.get("shape") == "external_side_effect":
-            ev_resp = await sb.table("evidence").select("score").eq(
+            ev_resp = await sb.table("evidence").select("*").eq(
                 "commitment_id", str(commitment_id)
             ).execute()
-            scores = [float(r.get("score") or 0) for r in (ev_resp.data or [])]
-            best_score = max(scores, default=0.0)
-            if best_score < 0.7:
+            required = required_fields(c_resp.data.get("recipient"), c_resp.data.get("object"))
+            best_score, ok = _qualifying_evidence(ev_resp.data or [], required)
+            if not ok:
                 raise ValueError(
-                    f"External commitment {commitment_id} requires evidence score >= 0.7 "
+                    f"External commitment {commitment_id} requires one evidence record with "
+                    f"score >= 0.7 that matches every named field ({', '.join(required) or 'none'}) "
                     f"before fulfillment (best score so far: {best_score:.2f}). "
                     "Add evidence first via POST /commitments/{id}/evidence."
                 )
