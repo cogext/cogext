@@ -496,3 +496,50 @@ async def test_missing_authentication_is_rejected(test_client, db, method, path,
     resp = await test_client.request(method, path, json=body)
     assert resp.status_code == 401
     assert db.snapshot() == before and db.writes == []
+
+
+# ---------------------------------------------------------------------------
+# Fulfilment gate: the account cannot self-certify with half-matching evidence
+# ---------------------------------------------------------------------------
+
+def _external(db, cid):
+    row = db.row("commitments", cid)
+    row.update(shape="external_side_effect", action="send", object="contract.pdf",
+               recipient="legal@northstar.io")
+
+
+async def _attach(test_client, cid, data):
+    resp = await test_client.post(f"/api/v1/commitments/{cid}/evidence",
+                                  json={"commitment_id": cid, "source": "api", "data": data})
+    assert resp.status_code == 200, resp.text
+    return resp.json()["score"]
+
+
+@pytest.mark.asyncio
+async def test_cannot_fulfil_external_with_right_recipient_wrong_file(test_client, db, as_account):
+    as_account(ACCOUNT_A); _external(db, A_OPEN_2)
+    score = await _attach(test_client, A_OPEN_2, {"action": "send", "to": "legal@northstar.io",
+                                                  "attachments": ["resume.pdf"]})
+    assert score >= 0.7                                    # high score, wrong file
+    resp = await test_client.patch(f"/api/v1/commitments/{A_OPEN_2}", json={"status": "fulfilled"})
+    assert resp.status_code == 409, resp.text
+    assert db.status(A_OPEN_2) == "open"
+
+
+@pytest.mark.asyncio
+async def test_cannot_fulfil_external_by_combining_two_half_records(test_client, db, as_account):
+    as_account(ACCOUNT_A); _external(db, A_OPEN_2)
+    await _attach(test_client, A_OPEN_2, {"action": "send", "to": "legal@northstar.io", "attachments": ["resume.pdf"]})
+    await _attach(test_client, A_OPEN_2, {"action": "send", "to": "sales@northstar.io", "attachments": ["contract.pdf"]})
+    resp = await test_client.patch(f"/api/v1/commitments/{A_OPEN_2}", json={"status": "fulfilled"})
+    assert resp.status_code == 409, resp.text
+
+
+@pytest.mark.asyncio
+async def test_can_fulfil_external_with_one_complete_record(test_client, db, as_account):
+    as_account(ACCOUNT_A); _external(db, A_OPEN_2)
+    await _attach(test_client, A_OPEN_2, {"action": "sent", "to": "Legal <legal@northstar.io>",
+                                          "attachments": ["contract.pdf"]})
+    resp = await test_client.patch(f"/api/v1/commitments/{A_OPEN_2}", json={"status": "fulfilled"})
+    assert resp.status_code == 200, resp.text
+    assert db.status(A_OPEN_2) == "fulfilled"

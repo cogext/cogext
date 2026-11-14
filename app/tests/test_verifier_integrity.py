@@ -85,8 +85,11 @@ def score(monkeypatch):
 
 
 def _gmail(message_id="msg-1"):
+    # A delivery of the "report" to the "client": sent TO them with the report attached.
+    # (A message merely FROM the client mentioning "Report" is not evidence of delivery.)
     return {"source": "gmail", "message_id": message_id, "thread_id": "t-1",
-            "from": "client@example.test", "subject": "Report", "date": "2026-10-10T10:00:00Z"}
+            "from": "agent@example.test", "to": "client@example.test", "subject": "Report",
+            "attachments": ["report"], "date": "2026-10-10T10:00:00Z"}
 
 
 def _commitment(db, cid):
