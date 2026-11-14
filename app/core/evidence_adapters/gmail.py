@@ -26,6 +26,7 @@ class GmailAdapter(EvidenceAdapter):
         "snippet": "...",        # first 200 chars of body
         "date": "2024-01-15T10:30:00Z",
         "labels": ["SENT", "INBOX"],
+        "attachments": ["contract.pdf"],   # optional: attachment filenames
     }
     """
 
@@ -64,6 +65,7 @@ class GmailAdapter(EvidenceAdapter):
                 "subject": subject,
                 "snippet": snippet,
                 "labels": labels,
+                "attachments": list(raw_event.get("attachments") or []),
             },
             occurred_at=dt,
             provenance=f"gmail:thread:{raw_event.get('thread_id', message_id)}",
