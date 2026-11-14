@@ -4,7 +4,14 @@ CRITICAL: Do NOT use MAX(score) or AVG(score).
 Track field coverage across evidence records.
 Multiple records covering different fields can collectively satisfy a
 commitment even if no single record reaches the threshold.
+
+Hard gates: when the commitment names a recipient or an object, that field
+must match in a record that also matches the action. A high score alone is
+never enough: the right action sent to the right person with the wrong file
+(or the right file to the wrong person) stays unverified, and a field matched
+by some unrelated record does not count.
 """
+from collections.abc import Iterable
 import logging
 from uuid import UUID
 
@@ -20,19 +27,42 @@ FIELD_WEIGHTS: dict[str, float] = {
     "deadline":   0.10,
 }
 
-DEFAULT_THRESHOLD = 0.60
+DEFAULT_THRESHOLD = 0.70
+
+# Fields that must match (when the commitment names them), whatever the score.
+GATED_FIELDS: tuple[str, ...] = ("recipient", "object")
+
+
+def required_fields(recipient: str | None, obj: str | None) -> list[str]:
+    """The gated fields this commitment actually names."""
+    named = {"recipient": recipient, "object": obj}
+    return [f for f in GATED_FIELDS if (named[f] or "").strip()]
+
+
+def missing_required(details: list[FieldMatchDetail], required: Iterable[str]) -> list[str]:
+    """Required fields not matched by this single record (alongside the action)."""
+    matched = {d.field for d in details if d.matched}
+    if "action" not in matched:
+        return list(required)
+    return [f for f in required if f not in matched]
 
 
 def aggregate_evidence(
     commitment_id: UUID,
     evidence_records: list[Evidence],
     threshold: float = DEFAULT_THRESHOLD,
+    required: Iterable[str] = (),
 ) -> EvidenceAggregation:
     """Aggregate evidence by field coverage.
 
     For each field, take the BEST score across all evidence records (not average).
     The aggregate score = sum(best_field_score * field_weight) for all fields.
+
+    `required` lists the gated fields the commitment names (see required_fields).
+    Each must be matched by a record that also matches the action, otherwise
+    meets_threshold is False regardless of the score.
     """
+    required = list(required)
     if not evidence_records:
         return EvidenceAggregation(
             commitment_id=commitment_id,
@@ -41,6 +71,7 @@ def aggregate_evidence(
             field_coverage={f: 0.0 for f in FIELD_WEIGHTS},
             meets_threshold=False,
             threshold=threshold,
+            missing_required=required,
         )
 
     # Field coverage: best score per field across all evidence records
@@ -64,14 +95,22 @@ def aggregate_evidence(
     # Round to avoid float precision issues
     aggregate_score = round(aggregate_score, 4)
 
+    # Hard gates: a gated field counts only if one record matched it together
+    # with the action.
+    satisfied: set[str] = set()
+    for ev in evidence_records:
+        satisfied |= set(required) - set(missing_required(ev.match_details, required))
+    missing = [f for f in required if f not in satisfied]
+
     return EvidenceAggregation(
         commitment_id=commitment_id,
         total_records=len(evidence_records),
         aggregate_score=aggregate_score,
         field_coverage=field_coverage,
-        meets_threshold=aggregate_score >= threshold,
+        meets_threshold=aggregate_score >= threshold and not missing,
         threshold=threshold,
         evidence_ids=evidence_ids,
+        missing_required=missing,
     )
 
 

@@ -72,3 +72,6 @@ class EvidenceAggregation(BaseModel):
     meets_threshold: bool
     threshold: float
     evidence_ids: list[UUID] = Field(default_factory=list)
+    # Gated fields (recipient/object) the commitment names but no record matched
+    # together with the action. Non-empty means not verified, whatever the score.
+    missing_required: list[str] = Field(default_factory=list)

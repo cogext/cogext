@@ -8,8 +8,11 @@ Pipeline:
   1. Load all registered adapters.
   2. Filter to adapters that can_handle the raw event.
   3. Normalise → NormalisedEvidence.
-  4. Score evidence relevance against the commitment.
-  5. If best score ≥ threshold → mark verified / rejected via state machine.
+  4. Hard gates: if the commitment names a recipient or object, it must appear
+     in this evidence. If not, the commitment cannot be verified and the LLM
+     is never asked.
+  5. Score evidence relevance against the commitment.
+  6. If gates pass and score ≥ threshold → mark verified via state machine.
 """
 from __future__ import annotations
 
@@ -20,6 +23,10 @@ from typing import Any
 from app.core.evidence_adapters.base import NormalisedEvidence
 from app.core.evidence_adapters.gmail import GmailAdapter
 import uuid as _uuid
+from app.core.evidence_aggregator import (
+    required_fields,
+    score_evidence_against_commitment,
+)
 from app.core.state_machine import transition_commitment
 from app.db.connection import get_supabase
 from app.models.commitment import Commitment
@@ -50,8 +57,16 @@ async def run_verification(
 
     evidence: NormalisedEvidence = adapter.normalise(raw_event)
 
-    # Score relevance using LLM (cheap: short prompt)
-    score, reason = await _score_evidence(commitment, evidence)
+    # Hard gates first. The model cannot verify a commitment whose named
+    # recipient or object is absent from the evidence (e.g. the right person
+    # got the wrong file).
+    gate_failures = _gate_failures(commitment, evidence)
+    if gate_failures:
+        score = 0.0
+        reason = "Evidence does not match the promised " + "; ".join(gate_failures)
+    else:
+        # Score relevance using LLM (cheap: short prompt)
+        score, reason = await _score_evidence(commitment, evidence)
 
     # Verification may only succeed on evidence actually stored for this
     # commitment. If it is not stored, nothing else changes.
@@ -150,6 +165,25 @@ async def _persist_evidence(
     if existing and existing.data and str(existing.data.get("commitment_id")) == str(commitment.id):
         return str(existing.data["id"])
     return None
+
+
+def _gate_failures(commitment: Commitment, evidence: NormalisedEvidence) -> list[str]:
+    """Named recipient/object fields this evidence does not contain."""
+    required = required_fields(commitment.recipient, commitment.object)
+    if not required:
+        return []
+    named = {"recipient": commitment.recipient, "object": commitment.object}
+    # Action is checked by the LLM for adapter events, so the gate looks only
+    # at the named recipient and object.
+    _, details = score_evidence_against_commitment(
+        evidence_data=evidence.data,
+        commitment_action=None,
+        commitment_recipient=commitment.recipient,
+        commitment_object=commitment.object,
+        commitment_deadline=None,
+    )
+    matched = {d.field for d in details if d.matched}
+    return [f"{f} ({named[f]!r})" for f in required if f not in matched]
 
 
 async def _score_evidence(commitment: Commitment, evidence: NormalisedEvidence) -> tuple[float, str]:

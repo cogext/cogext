@@ -7,7 +7,11 @@ from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from app.core.auth import Account, get_current_account
-from app.core.evidence_aggregator import aggregate_evidence, score_evidence_against_commitment
+from app.core.evidence_aggregator import (
+    aggregate_evidence,
+    required_fields,
+    score_evidence_against_commitment,
+)
 from app.core.ownership import get_owned_commitment
 from app.db.connection import get_supabase
 from app.models.evidence import Evidence, EvidenceAggregation, SubmitEvidenceRequest
@@ -161,12 +165,16 @@ async def get_evidence_aggregate(
 ) -> EvidenceAggregation:
     sb = get_supabase()
     # Evidence belongs to its commitment; the caller must own it (404 otherwise)
-    await get_owned_commitment(sb, commitment_id, account, "id")
+    c_row = await get_owned_commitment(sb, commitment_id, account, "id, recipient, object")
     resp = await sb.table("evidence").select("*").eq(
         "commitment_id", str(commitment_id)
     ).execute()
     records = [Evidence.model_validate(r) for r in (resp.data or [])]
-    return aggregate_evidence(commitment_id, records)
+    return aggregate_evidence(
+        commitment_id,
+        records,
+        required=required_fields(c_row.get("recipient"), c_row.get("object")),
+    )
 
 
 @router.post("/evidence/external", response_model=Evidence)
