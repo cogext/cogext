@@ -5,8 +5,8 @@ Track field coverage across evidence records.
 Multiple records covering different fields can collectively satisfy a
 commitment even if no single record reaches the threshold.
 
-Hard gates: when the commitment names a recipient or an object, that field
-must match in a record that also matches the action. A high score alone is
+Hard gates: when the commitment names a recipient or an object, a single
+record must match the action and all of those fields together. A high score alone is
 never enough: the right action sent to the right person with the wrong file
 (or the right file to the wrong person) stays unverified, and a field matched
 by some unrelated record does not count.
@@ -95,12 +95,16 @@ def aggregate_evidence(
     # Round to avoid float precision issues
     aggregate_score = round(aggregate_score, 4)
 
-    # Hard gates: a gated field counts only if one record matched it together
-    # with the action.
-    satisfied: set[str] = set()
+    # Hard gates: ONE record must match the action and every named gated field
+    # together. Fields satisfied by different records never combine: a right
+    # recipient in one email and the right file in another is not the promise.
+    missing = list(required)
     for ev in evidence_records:
-        satisfied |= set(required) - set(missing_required(ev.match_details, required))
-    missing = [f for f in required if f not in satisfied]
+        m = missing_required(ev.match_details, required)
+        if len(m) < len(missing):
+            missing = m
+        if not missing:
+            break
 
     return EvidenceAggregation(
         commitment_id=commitment_id,

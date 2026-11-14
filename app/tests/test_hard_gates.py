@@ -156,3 +156,18 @@ async def test_live_right_file_right_person_verifies(live):
     out = await verifier.run_verification(_commitment(), _gmail(RECIPIENT, [OBJECT]))
     assert out["status"] == "verified"
     assert "transition" in live
+
+
+def test_valid_fields_from_two_records_cannot_combine():
+    """Each record has the action plus one right field; neither is the whole promise.
+
+    Record A: right recipient, wrong file. Record B: right file, wrong recipient.
+    Together they cover every field, but no single action did what was promised.
+    """
+    cid = uuid.uuid4()
+    a = _record(cid, {"action": "send", "to": RECIPIENT, "attachments": ["resume.pdf"]})
+    b = _record(cid, {"action": "send", "to": "sales@northstar.io", "attachments": [OBJECT]})
+    result = aggregate_evidence(cid, [a, b], required=REQUIRED)
+    assert result.aggregate_score >= 0.70
+    assert result.meets_threshold is False
+    assert result.missing_required  # no single record satisfies the promise
